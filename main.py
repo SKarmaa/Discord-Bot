@@ -5,6 +5,7 @@ import re
 import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
+from nepali_datetime import nepali_datetime
 
 import discord
 from discord.ext import commands
@@ -447,45 +448,46 @@ async def ping_command(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 Pong! Latency: {latency}ms")
 
 
-@bot.tree.command(name="date", description="Get current date and time")
+@bot.tree.command(name="date", description="Get current date and time in both English and Nepali (Bikram Sambat)")
 async def date_command(interaction: discord.Interaction):
-    """Get current date/time with Nepali translation"""
+    """Get current date/time with proper Nepali Bikram Sambat conversion"""
     try:
         nepal_tz = pytz.timezone('Asia/Kathmandu')
         now = datetime.now(nepal_tz)
         
+        # English date and time
         english_date = now.strftime("%A, %B %d, %Y")
         english_time = now.strftime("%I:%M %p")
         
-        # Nepali translations
-        nepali_days = {
-            'Monday': 'सोमबार', 'Tuesday': 'मंगलबार', 'Wednesday': 'बुधबार',
-            'Thursday': 'बिहिबार', 'Friday': 'शुक्रबार', 'Saturday': 'शनिबार',
-            'Sunday': 'आइतबार'
-        }
+        # Convert to Nepali Bikram Sambat using nepali-datetime
+        nepali_date_obj = nepali_datetime.from_datetime_datetime(now)
         
-        nepali_months = {
-            'January': 'जनवरी', 'February': 'फेब्रुअरी', 'March': 'मार्च',
-            'April': 'अप्रिल', 'May': 'मे', 'June': 'जुन',
-            'July': 'जुलाई', 'August': 'अगस्त', 'September': 'सेप्टेम्बर',
-            'October': 'अक्टोबर', 'November': 'नोभेम्बर', 'December': 'डिसेम्बर'
-        }
+        # Format Nepali date with proper Devanagari script
+        nepali_date_formatted = nepali_date_obj.strftime("%A, %d %B %Y")
         
-        day_name = now.strftime("%A")
-        month_name = now.strftime("%B")
-        nepali_day = nepali_days.get(day_name, day_name)
-        nepali_month = nepali_months.get(month_name, month_name)
+        # Alternative: Get individual components if you want custom formatting
+        # nepali_year = nepali_date_obj.year
+        # nepali_month = nepali_date_obj.month
+        # nepali_day = nepali_date_obj.day
+        # nepali_weekday = nepali_date_obj.strftime("%A")
+        # nepali_month_name = nepali_date_obj.strftime("%B")
         
         response = f"""📅 **Current Date & Time:**
 
-🇬🇧 **English:** {english_date}
-🇳🇵 **Nepali:** {nepali_day}, {nepali_month} {now.day}, {now.year}
+🇬🇧 **English (AD):** {english_date}
+🇳🇵 **Nepali (BS):** {nepali_date_formatted}
 
 🕐 **Time:** {english_time} (Nepal Time)
 🌍 **Timezone:** Asia/Kathmandu (NPT)"""
         
         await interaction.response.send_message(response)
         
+    except ImportError:
+        # Fallback if nepali-datetime is not installed
+        await interaction.response.send_message(
+            "❌ Error: nepali-datetime library is not installed.\n"
+            "Please install it using: `pip install nepali-datetime`"
+        )
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting date: {e}")
 
