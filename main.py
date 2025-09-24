@@ -40,7 +40,7 @@ CONFIG = {}
 TRIGGER_WORDS = []
 
 # AI Integration variables
-AI_TRIGGER_PHRASE = "oh kp baa"  # Your trigger phrase
+AI_TRIGGER_PHRASE = "oh kp baa"  # AI Trigger phrase
 AI_USER_COOLDOWNS = {}  # Track user cooldowns
 AI_COOLDOWN_MINUTES = 5  # Cooldown time in minutes
 GEMINI_API_KEY = None
@@ -90,7 +90,7 @@ async def query_gemini_api(prompt: str) -> str:
     if not GEMINI_API_KEY:
         return "❌ Gemini API key not configured. Please add GEMINI_API_KEY to your .env file."
     
-    # Updated model name - use gemini-1.5-flash for free tier or gemini-1.5-pro
+    # Using gemini-1.5-flash
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     headers = {
