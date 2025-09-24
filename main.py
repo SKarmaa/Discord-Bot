@@ -458,6 +458,9 @@ async def ping_command(interaction: discord.Interaction):
 @bot.tree.command(name="date", description="Get current date and time in both English and Nepali (Bikram Sambat)")
 async def date_command(interaction: discord.Interaction):
     """Get current date/time with proper Nepali Bikram Sambat conversion"""
+    # Respond immediately to prevent timeout
+    await interaction.response.defer()
+    
     try:
         nepal_tz = pytz.timezone('Asia/Kathmandu')
         now = datetime.now(nepal_tz)
@@ -504,12 +507,16 @@ async def date_command(interaction: discord.Interaction):
 🕐 **Time:** {english_time} (Nepal Time)
 🌍 **Timezone:** Asia/Kathmandu (NPT)"""
         
-        await interaction.response.send_message(response)
+        # Use followup instead of response since we already deferred
+        await interaction.followup.send(response)
         
     except Exception as e:
-        await interaction.response.send_message(f"❌ Error getting date: {e}")
         print(f"Date command error: {e}")
-
+        try:
+            await interaction.followup.send(f"❌ Error getting date: {str(e)}")
+        except:
+            # If followup also fails, just log it
+            print(f"Failed to send error message: {e}")
 
 @bot.tree.command(name="serverinfo", description="Get server information")
 async def serverinfo_command(interaction: discord.Interaction):
