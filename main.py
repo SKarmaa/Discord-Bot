@@ -135,10 +135,10 @@ async def query_gemini_api(prompt: str) -> str:
                     return f"❌ API Error: {response.status}. Please try again later."
                     
     except asyncio.TimeoutError:
-        return "❌ AI request timed out. Please try again."
+        return "❌ Request timed out. Please try again."
     except Exception as e:
         print(f"Gemini API Exception: {e}")
-        return f"❌ Error connecting to AI: {str(e)}"
+        return f"❌ Error connecting to KP: {str(e)}"
 
 def load_bot_data():
     """Load bot configuration and responses from JSON file"""
@@ -343,7 +343,7 @@ async def on_message(message):
         
         if not can_query:
             remaining_time = ai_rate_limiter.get_remaining_time(user_id)
-            await message.reply(f"⏰ **AI Cooldown Active**\nYou can ask me again in **{remaining_time}**\n*Each user can make 1 AI query every {AI_COOLDOWN_MINUTES} minutes*")
+            await message.reply(f"⏰ **Cooldown Active**\nYou can ask me again in **{remaining_time}**\n*Each user can make 1 query every {AI_COOLDOWN_MINUTES} minutes*")
             return
         
         # Extract the prompt
@@ -354,7 +354,7 @@ async def on_message(message):
             return
         
         if len(prompt) > 500:
-            await message.reply("❌ **Prompt too long!** Please keep your question under 500 characters.")
+            await message.reply("❌ **Prompt too long!** Please keep your question under 100 characters.")
             return
         
         # Record the query attempt
@@ -375,7 +375,7 @@ async def on_message(message):
                     for chunk in chunks[1:]:
                         await message.channel.send(chunk)
                 else:
-                    await message.reply(f"🤖 **AI Response:**\n{ai_response}")
+                    await message.reply(f"{ai_response}")
                 
                 print(f"AI response sent to {message.author}")
                 
@@ -672,7 +672,7 @@ async def ai_status_command(interaction: discord.Interaction):
         status = "✅ **Ready to use AI!**\nYou can ask me a question now."
     else:
         remaining_time = ai_rate_limiter.get_remaining_time(user_id)
-        status = f"⏰ **AI Cooldown Active**\nYou can ask me again in **{remaining_time}**"
+        status = f"⏰ **Cooldown Active**\nYou can ask me again in **{remaining_time}**"
     
     await interaction.response.send_message(
         f"{status}\n\n*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*\n*Use: `{AI_TRIGGER_PHRASE} your question` or `/ai your question`*",
