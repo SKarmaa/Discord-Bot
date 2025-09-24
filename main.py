@@ -3,8 +3,11 @@ import json
 import random
 import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
+import aiohttp
+import time
+
 try:
     import nepali_datetime
     NEPALI_DATETIME_AVAILABLE = True
@@ -12,7 +15,6 @@ try:
 except ImportError as e:
     print(f"nepali-datetime import error: {e}")
     NEPALI_DATETIME_AVAILABLE = False
-
 
 import discord
 from discord.ext import commands
@@ -37,10 +39,118 @@ WELCOME_MESSAGES = []
 CONFIG = {}
 TRIGGER_WORDS = []
 
+# AI Integration variables
+AI_TRIGGER_PHRASE = "oh kp baa"  # Your trigger phrase
+AI_USER_COOLDOWNS = {}  # Track user cooldowns
+AI_COOLDOWN_MINUTES = 5  # Cooldown time in minutes
+GEMINI_API_KEY = None
+
+class AIRateLimiter:
+    """Handle rate limiting for AI queries"""
+    
+    def __init__(self, cooldown_minutes: int = 5):
+        self.cooldown_minutes = cooldown_minutes
+        self.user_last_query = {}
+    
+    def can_query(self, user_id: int) -> tuple[bool, int]:
+        """Check if user can make a query. Returns (can_query, seconds_remaining)"""
+        now = time.time()
+        last_query = self.user_last_query.get(user_id, 0)
+        time_passed = now - last_query
+        cooldown_seconds = self.cooldown_minutes * 60
+        
+        if time_passed >= cooldown_seconds:
+            return True, 0
+        else:
+            remaining = int(cooldown_seconds - time_passed)
+            return False, remaining
+    
+    def record_query(self, user_id: int):
+        """Record that user made a query"""
+        self.user_last_query[user_id] = time.time()
+    
+    def get_remaining_time(self, user_id: int) -> str:
+        """Get formatted remaining time string"""
+        _, seconds = self.can_query(user_id)
+        if seconds <= 0:
+            return "Ready to use"
+        
+        minutes = seconds // 60
+        secs = seconds % 60
+        if minutes > 0:
+            return f"{minutes}m {secs}s"
+        else:
+            return f"{secs}s"
+
+# Initialize rate limiter
+ai_rate_limiter = AIRateLimiter(AI_COOLDOWN_MINUTES)
+
+async def query_gemini_api(prompt: str) -> str:
+    """Query Google's Gemini API"""
+    if not GEMINI_API_KEY:
+        return "❌ Gemini API key not configured. Please add GEMINI_API_KEY to your .env file."
+    
+    # Updated model name - use gemini-1.5-flash for free tier or gemini-1.5-pro
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    
+    data = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.7,
+            "topK": 40,
+            "topP": 0.95,
+            "maxOutputTokens": 1024,
+        }
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=data, timeout=30) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    
+                    if 'candidates' in result and len(result['candidates']) > 0:
+                        candidate = result['candidates'][0]
+                        if 'content' in candidate and 'parts' in candidate['content']:
+                            return candidate['content']['parts'][0]['text']
+                        else:
+                            return "❌ No content in API response"
+                    else:
+                        return "❌ No candidates in API response"
+                else:
+                    error_text = await response.text()
+                    print(f"Gemini API Error {response.status}: {error_text}")
+                    return f"❌ API Error: {response.status}. Please try again later."
+                    
+    except asyncio.TimeoutError:
+        return "❌ AI request timed out. Please try again."
+    except Exception as e:
+        print(f"Gemini API Exception: {e}")
+        return f"❌ Error connecting to AI: {str(e)}"
 
 def load_bot_data():
     """Load bot configuration and responses from JSON file"""
-    global BOT_DATA, WITTY_RESPONSES, WELCOME_MESSAGES, CONFIG, TRIGGER_WORDS
+    global BOT_DATA, WITTY_RESPONSES, WELCOME_MESSAGES, CONFIG, TRIGGER_WORDS, GEMINI_API_KEY
+    
+    # Load Gemini API key from environment
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    if not GEMINI_API_KEY:
+        print("⚠️  WARNING: GEMINI_API_KEY not found in environment variables!")
+        print("AI functionality will be disabled. Add GEMINI_API_KEY=your_key to .env file")
+    else:
+        print("✅ Gemini API key loaded successfully")
     
     try:
         with open('bot_data.json', 'r', encoding='utf-8') as f:
@@ -62,7 +172,6 @@ def load_bot_data():
     except json.JSONDecodeError as e:
         print(f"Error reading bot_data.json: {e}")
         create_default_config()
-
 
 def create_default_config():
     """Create default configuration file"""
@@ -109,12 +218,10 @@ def create_default_config():
     
     print("Created default bot_data.json - please configure your IDs!")
 
-
 def reload_bot_data():
     """Reload configuration from file"""
     load_bot_data()
     print("Bot data reloaded successfully!")
-
 
 def find_trigger_words(message_content: str) -> List[str]:
     """Find trigger words in message content"""
@@ -128,18 +235,15 @@ def find_trigger_words(message_content: str) -> List[str]:
     
     return found_words
 
-
 def get_witty_response(trigger_word: str) -> Optional[str]:
     """Get random response for trigger word"""
     responses = WITTY_RESPONSES.get(trigger_word)
     return random.choice(responses) if responses else None
 
-
 def get_welcome_message(member: discord.Member) -> str:
     """Get formatted welcome message"""
     template = random.choice(WELCOME_MESSAGES) if WELCOME_MESSAGES else "Welcome {user}!"
     return template.format(user=member.mention)
-
 
 def process_mentions(message_text: str, guild: discord.Guild) -> str:
     """Convert @userID format to proper Discord mentions"""
@@ -152,6 +256,19 @@ def process_mentions(message_text: str, guild: discord.Guild) -> str:
     
     return re.sub(pattern, replace_mention, message_text)
 
+def extract_ai_prompt(message_content: str) -> str:
+    """Extract the prompt after the AI trigger phrase"""
+    message_lower = message_content.lower()
+    trigger_index = message_lower.find(AI_TRIGGER_PHRASE.lower())
+    
+    if trigger_index == -1:
+        return ""
+    
+    # Get everything after the trigger phrase
+    start_index = trigger_index + len(AI_TRIGGER_PHRASE)
+    prompt = message_content[start_index:].strip()
+    
+    return prompt
 
 @bot.event
 async def on_ready():
@@ -163,6 +280,8 @@ async def on_ready():
         print(f'  - {guild.name} (ID: {guild.id}) - {guild.member_count} members')
     
     print(f'Watching for trigger words: {", ".join(TRIGGER_WORDS)}')
+    print(f'AI trigger phrase: "{AI_TRIGGER_PHRASE}"')
+    print(f'AI cooldown: {AI_COOLDOWN_MINUTES} minutes')
     print(f'Members Intent: {"✅ ENABLED" if bot.intents.members else "❌ DISABLED"}')
     print(f'Message Content Intent: {"✅ ENABLED" if bot.intents.message_content else "❌ DISABLED"}')
     
@@ -176,7 +295,6 @@ async def on_ready():
         print(f"Failed to sync commands: {e}")
     
     print("Bot is ready!")
-
 
 @bot.event
 async def on_member_join(member: discord.Member):
@@ -206,13 +324,66 @@ async def on_member_join(member: discord.Member):
         except Exception as e:
             print(f"Failed to send welcome message: {e}")
 
-
 @bot.event
 async def on_message(message):
     """Handle incoming messages"""
     # Ignore bot messages
     if message.author.bot:
         return
+    
+    message_content = message.content.strip()
+    message_lower = message_content.lower()
+    
+    # Check for AI trigger phrase first
+    if AI_TRIGGER_PHRASE.lower() in message_lower and len(message_content) > len(AI_TRIGGER_PHRASE):
+        user_id = message.author.id
+        
+        # Check rate limiting
+        can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+        
+        if not can_query:
+            remaining_time = ai_rate_limiter.get_remaining_time(user_id)
+            await message.reply(f"⏰ **AI Cooldown Active**\nYou can ask me again in **{remaining_time}**\n*Each user can make 1 AI query every {AI_COOLDOWN_MINUTES} minutes*")
+            return
+        
+        # Extract the prompt
+        prompt = extract_ai_prompt(message_content)
+        
+        if not prompt:
+            await message.reply(f"❓ Please provide a question after \"{AI_TRIGGER_PHRASE}\"\n*Example: {AI_TRIGGER_PHRASE} what is the weather like today?*")
+            return
+        
+        if len(prompt) > 500:
+            await message.reply("❌ **Prompt too long!** Please keep your question under 500 characters.")
+            return
+        
+        # Record the query attempt
+        ai_rate_limiter.record_query(user_id)
+        
+        # Show typing indicator
+        async with message.channel.typing():
+            try:
+                print(f"AI query from {message.author}: {prompt[:50]}...")
+                
+                # Query the AI
+                ai_response = await query_gemini_api(prompt)
+                
+                # Split long responses
+                if len(ai_response) > 2000:
+                    chunks = [ai_response[i:i+1900] for i in range(0, len(ai_response), 1900)]
+                    await message.reply(f"{chunks[0]}")
+                    for chunk in chunks[1:]:
+                        await message.channel.send(chunk)
+                else:
+                    await message.reply(f"🤖 **AI Response:**\n{ai_response}")
+                
+                print(f"AI response sent to {message.author}")
+                
+            except Exception as e:
+                print(f"Error processing AI query: {e}")
+                await message.reply("❌ Sorry, I encountered an error while processing your request. Please try again later.")
+        
+        return  # Don't process other triggers when AI is used
     
     # React to special user mentions
     samu_user_id = CONFIG.get("samu_user_id")
@@ -223,7 +394,7 @@ async def on_message(message):
             await message.add_reaction(reaction)
             print(f"Added {reaction} reaction - special user was mentioned")
     
-    # Check for trigger words
+    # Check for trigger words (only if AI wasn't triggered)
     trigger_words = find_trigger_words(message.content)
     if trigger_words:
         chosen_word = random.choice(trigger_words)
@@ -245,7 +416,6 @@ async def on_message(message):
     
     # Process commands
     await bot.process_commands(message)
-
 
 # Slash Commands
 @bot.tree.command(name="kpannounce", description="Send announcement with @everyone (Authorized users only)")
@@ -306,7 +476,6 @@ async def announce_command(interaction: discord.Interaction, message: str):
         await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
         print(f"Error in announce command: {e}")
 
-
 @bot.tree.command(name="kpwrite", description="Send message to general chat (Authorized users only)")
 async def write_command(interaction: discord.Interaction, message: str):
     """Send message to general channel"""
@@ -354,7 +523,6 @@ async def write_command(interaction: discord.Interaction, message: str):
         
     except Exception as e:
         await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
-
 
 @bot.tree.command(name="kpprotest", description="Send protest message (Authorized users only)")
 async def protest_command(interaction: discord.Interaction):
@@ -447,13 +615,75 @@ Take this seriously. Think before acting."""
             pass
         print(f"Error in protest command: {e}")
 
+@bot.tree.command(name="ai", description="Ask AI a question (Rate limited)")
+async def ai_command(interaction: discord.Interaction, prompt: str):
+    """Slash command for AI queries"""
+    user_id = interaction.user.id
+    
+    # Check rate limiting
+    can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+    
+    if not can_query:
+        remaining_time = ai_rate_limiter.get_remaining_time(user_id)
+        await interaction.response.send_message(
+            f"⏰ **Cooldown Active**\nYou can ask me again in **{remaining_time}**\n*Each user can make 1 query every {AI_COOLDOWN_MINUTES} minutes*",
+            ephemeral=True
+        )
+        return
+    
+    if len(prompt) > 100:
+        await interaction.response.send_message("❌ **Prompt too long!** Please keep your question under 500 characters.", ephemeral=True)
+        return
+    
+    # Record the query attempt
+    ai_rate_limiter.record_query(user_id)
+    
+    # Defer response to prevent timeout
+    await interaction.response.defer()
+    
+    try:
+        print(f"AI slash command from {interaction.user}: {prompt[:50]}...")
+        
+        # Query the AI
+        ai_response = await query_gemini_api(prompt)
+        
+        # Send response
+        if len(ai_response) > 2000:
+            chunks = [ai_response[i:i+1900] for i in range(0, len(ai_response), 1900)]
+            await interaction.followup.send(f"🤖 **AI Response:**\n{chunks[0]}")
+            for chunk in chunks[1:]:
+                await interaction.followup.send(chunk)
+        else:
+            await interaction.followup.send(f"🤖 **AI Response:**\n{ai_response}")
+        
+        print(f"AI response sent to {interaction.user}")
+        
+    except Exception as e:
+        print(f"Error in AI slash command: {e}")
+        await interaction.followup.send("❌ Sorry, I encountered an error while processing your request. Please try again later.")
+
+@bot.tree.command(name="aistatus", description="Check your AI cooldown status")
+async def ai_status_command(interaction: discord.Interaction):
+    """Check AI cooldown status"""
+    user_id = interaction.user.id
+    can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+    
+    if can_query:
+        status = "✅ **Ready to use AI!**\nYou can ask me a question now."
+    else:
+        remaining_time = ai_rate_limiter.get_remaining_time(user_id)
+        status = f"⏰ **AI Cooldown Active**\nYou can ask me again in **{remaining_time}**"
+    
+    await interaction.response.send_message(
+        f"{status}\n\n*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*\n*Use: `{AI_TRIGGER_PHRASE} your question` or `/ai your question`*",
+        ephemeral=True
+    )
 
 @bot.tree.command(name="ping", description="Check bot status")
 async def ping_command(interaction: discord.Interaction):
     """Simple ping command"""
     latency = round(bot.latency * 1000)
     await interaction.response.send_message(f"🏓 Pong! Latency: {latency}ms")
-
 
 @bot.tree.command(name="date", description="Get current date and time in both English and Nepali (Bikram Sambat)")
 async def date_command(interaction: discord.Interaction):
@@ -537,7 +767,6 @@ async def serverinfo_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(info)
 
-
 @bot.tree.command(name="reload", description="Reload bot configuration (Admin only)")
 async def reload_command(interaction: discord.Interaction):
     """Reload bot data from JSON file"""
@@ -552,7 +781,6 @@ async def reload_command(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Only administrators can reload data!")
 
-
 # Text Commands
 @bot.command(name="help")
 async def help_command(ctx):
@@ -563,6 +791,8 @@ async def help_command(ctx):
 • `/ping` - Check bot status
 • `/date` - Get current date/time
 • `/serverinfo` - Server information
+• `/ai <prompt>` - Ask AI a question (rate limited)
+• `/aistatus` - Check your AI cooldown status
 • `/kpwrite <message>` - Send message (authorized users)
 • `/kpannounce <message>` - Send announcement (authorized users)
 • `/kpprotest` - Send protest message (authorized users)
@@ -573,13 +803,17 @@ async def help_command(ctx):
 • `!words` - Show trigger words
 • `!reload-data` - Reload config (admins)
 
+**AI Features:**
+• Type `{AI_TRIGGER_PHRASE} your question` to ask AI
+• Rate limit: 1 query per user every {AI_COOLDOWN_MINUTES} minutes
+• Max prompt length: 500 characters
+
 **Trigger Words:**
 {', '.join(TRIGGER_WORDS[:10])}{'...' if len(TRIGGER_WORDS) > 10 else ''}
 
 The bot responds to messages containing these trigger words!"""
     
     await ctx.send(help_text)
-
 
 @bot.command(name="words")
 async def words_command(ctx):
@@ -596,7 +830,6 @@ async def words_command(ctx):
     else:
         await ctx.send("No trigger words configured.")
 
-
 @bot.command(name="reload-data")
 async def reload_data_command(ctx):
     """Reload configuration (admin only)"""
@@ -611,7 +844,6 @@ async def reload_data_command(ctx):
     else:
         await ctx.send("❌ Only administrators can reload data!")
 
-
 def main():
     """Main function to run the bot"""
     # Load configuration first
@@ -624,8 +856,9 @@ def main():
         print("❌ ERROR: No bot token found!")
         print("Please create a .env file with:")
         print("TOKEN=your_bot_token_here")
+        print("GEMINI_API_KEY=your_gemini_api_key_here")
         print()
-        print("Or set the TOKEN environment variable")
+        print("Or set the TOKEN and GEMINI_API_KEY environment variables")
         return
     
     try:
@@ -636,7 +869,6 @@ def main():
         print("Please check your token in the .env file")
     except Exception as e:
         print(f"❌ ERROR: Failed to start bot: {e}")
-
 
 if __name__ == "__main__":
     main()
