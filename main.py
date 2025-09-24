@@ -5,7 +5,14 @@ import re
 import asyncio
 from datetime import datetime
 from typing import Dict, List, Optional
-from nepali_datetime import nepali_datetime
+try:
+    import nepali_datetime
+    NEPALI_DATETIME_AVAILABLE = True
+    print("nepali-datetime imported successfully")
+except ImportError as e:
+    print(f"nepali-datetime import error: {e}")
+    NEPALI_DATETIME_AVAILABLE = False
+
 
 import discord
 from discord.ext import commands
@@ -459,37 +466,49 @@ async def date_command(interaction: discord.Interaction):
         english_date = now.strftime("%A, %B %d, %Y")
         english_time = now.strftime("%I:%M %p")
         
-        # Convert to Nepali Bikram Sambat using nepali-datetime
-        nepali_date_obj = nepali_datetime.from_datetime_datetime(now)
+        # Convert to Nepali Bikram Sambat
+        nepali_date_str = "BS conversion unavailable"
         
-        # Format Nepali date with proper Devanagari script
-        nepali_date_formatted = nepali_date_obj.strftime("%A, %d %B %Y")
+        if NEPALI_DATETIME_AVAILABLE:
+            try:
+                # Method 1: Try using datetime conversion
+                nepali_dt = nepali_datetime.datetime.from_datetime_datetime(now)
+                nepali_date_str = nepali_dt.strftime("%A, %d %B %Y")
+                print(f"Nepali datetime conversion successful: {nepali_date_str}")
+            except Exception as e:
+                print(f"Nepali datetime conversion error: {e}")
+                try:
+                    # Method 2: Try using date-only conversion
+                    nepali_d = nepali_datetime.date.from_datetime_date(now.date())
+                    nepali_date_str = nepali_d.strftime("%A, %d %B %Y")
+                    print(f"Nepali date conversion successful: {nepali_date_str}")
+                except Exception as e2:
+                    print(f"Nepali date conversion error: {e2}")
+                    nepali_date_str = "BS conversion failed"
         
-        # Alternative: Get individual components if you want custom formatting
-        # nepali_year = nepali_date_obj.year
-        # nepali_month = nepali_date_obj.month
-        # nepali_day = nepali_date_obj.day
-        # nepali_weekday = nepali_date_obj.strftime("%A")
-        # nepali_month_name = nepali_date_obj.strftime("%B")
+        # Fallback with Nepali day names if conversion fails
+        if "conversion" in nepali_date_str.lower():
+            nepali_days = {
+                'Monday': 'सोमबार', 'Tuesday': 'मंगलबार', 'Wednesday': 'बुधबार',
+                'Thursday': 'बिहिबार', 'Friday': 'शुक्रबार', 'Saturday': 'शनिबार',
+                'Sunday': 'आइतबार'
+            }
+            weekday_nepali = nepali_days.get(now.strftime("%A"), now.strftime("%A"))
+            nepali_date_str = f"{weekday_nepali} (BS date conversion issue)"
         
         response = f"""📅 **Current Date & Time:**
 
 🇬🇧 **English (AD):** {english_date}
-🇳🇵 **Nepali (BS):** {nepali_date_formatted}
+🇳🇵 **Nepali (BS):** {nepali_date_str}
 
 🕐 **Time:** {english_time} (Nepal Time)
 🌍 **Timezone:** Asia/Kathmandu (NPT)"""
         
         await interaction.response.send_message(response)
         
-    except ImportError:
-        # Fallback if nepali-datetime is not installed
-        await interaction.response.send_message(
-            "❌ Error: nepali-datetime library is not installed.\n"
-            "Please install it using: `pip install nepali-datetime`"
-        )
     except Exception as e:
         await interaction.response.send_message(f"❌ Error getting date: {e}")
+        print(f"Date command error: {e}")
 
 
 @bot.tree.command(name="serverinfo", description="Get server information")
