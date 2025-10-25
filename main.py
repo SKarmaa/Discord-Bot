@@ -355,7 +355,7 @@ async def on_message(message):
                     pass
     
     # Random reactions
-    if random.random() < 0.1:
+    if random.random() < 0.01:
         general_reactions = CONFIG.get("general_reactions", ["😊"])
         try:
             await message.add_reaction(random.choice(general_reactions))
