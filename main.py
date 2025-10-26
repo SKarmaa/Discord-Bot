@@ -57,6 +57,7 @@ GEMINI_API_KEY = None
 
 # Music Player Configuration - Optimized and Robust
 YTDL_OPTIONS = {
+    'cookiefile': 'cookies.txt',
     'format': 'bestaudio[ext=webm]/bestaudio/best',
     'noplaylist': False,
     'nocheckcertificate': True,
@@ -1036,8 +1037,6 @@ async def leave_command(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Not connected to a voice channel!")
 
-# ==================== EXISTING COMMANDS ====================
-
 @bot.tree.command(name="kpwrite", description="Send a message to the general channel")
 @app_commands.describe(message="Message to send")
 async def kpwrite_command(interaction: discord.Interaction, message: str):
@@ -1088,43 +1087,6 @@ async def kpannounce_command(interaction: discord.Interaction, message: str):
         )
         await channel.send(embed=embed)
         await interaction.response.send_message("✅ Announcement sent!", ephemeral=True)
-    else:
-        await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
-
-@bot.tree.command(name="kpprotest", description="Send the protest message")
-async def kpprotest_command(interaction: discord.Interaction):
-    """Send protest message (authorized users only)"""
-    authorized_user_id = CONFIG.get("write_command_user_id", 0)
-    
-    if interaction.user.id != authorized_user_id:
-        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
-        return
-    
-    general_channel_id = CONFIG.get("general_channel_id", 0)
-    
-    if not general_channel_id:
-        await interaction.response.send_message("❌ General channel not configured!", ephemeral=True)
-        return
-    
-    channel = bot.get_channel(general_channel_id)
-    
-    if channel:
-        protest_message = """@everyone 
-
-**बहिष्कार गर्नुहोस् वा कारवाही भोग्नुहोस्** 🚨
-
-यदि तपाईंले भोलि बहिष्कार गर्नुभएन भने तपाईं यस सर्भरबाट permanently ban हुनेछ।
-
-यो कुनै मजाक होइन। हामी गम्भीर छौं। 🔥
-
-**बहिष्कार गर:** भोलि
-**समय:** पूरा दिन
-**कारण:** परीक्षा protest
-
-सबैले पालना गर्नु अनिवार्य छ। 💪"""
-        
-        await channel.send(protest_message)
-        await interaction.response.send_message("✅ Protest message sent!", ephemeral=True)
     else:
         await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
 
