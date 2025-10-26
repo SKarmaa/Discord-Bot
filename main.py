@@ -715,7 +715,7 @@ async def on_message(message):
                 break
     
     # Random reactions
-    if random.random() < 0.15:
+    if random.random() < 0.01:
         samu_id = CONFIG.get("samu_user_id", 0)
         
         if samu_id and message.author.id == samu_id:
