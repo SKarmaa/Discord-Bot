@@ -55,44 +55,28 @@ AI_USER_COOLDOWNS = {}  # Track user cooldowns
 AI_COOLDOWN_MINUTES = 5  # Cooldown time in minutes
 GEMINI_API_KEY = None
 
-# Music Player Configuration
+# Music Player Configuration - Optimized and Robust
 YTDL_OPTIONS = {
-    'format': 'bestaudio[acodec=opus]/bestaudio[ext=webm][acodec=opus]/bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'opus',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
+    'format': 'bestaudio[ext=webm]/bestaudio/best',
     'noplaylist': False,
     'nocheckcertificate': True,
     'ignoreerrors': False,
     'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch',
+    'default_search': 'auto',
     'source_address': '0.0.0.0',
     'extract_flat': False,
-    'force_generic_extractor': False,
-    'cachedir': False,
-    'age_limit': None,
-    'socket_timeout': 10,
-    'retries': 2,
-    'fragment_retries': 2,
-    'skip_unavailable_fragments': True,
-    'keepvideo': False,
-    'prefer_free_formats': False,  # Changed to False to get best quality
-    'youtube_include_dash_manifest': False,
-    'youtube_include_hls_manifest': False,
-    'extractor_args': {
-        'youtube': {
-            'skip': ['hls', 'dash', 'translated_subs'],
-            'player_client': ['android', 'web'],
-        }
-    },
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'opus',
-        'preferredquality': '160',
-    }],
+    'geo_bypass': True,
+    'socket_timeout': 30,
+    'retries': 10,
+    'fragment_retries': 10,
+    'extractor_retries': 5,
+    'file_access_retries': 5,
+    'http_chunk_size': 10485760,
+    'noprogress': True,
+    'no_check_certificate': True,
+    'prefer_insecure': False,
 }
 
 FFMPEG_OPTIONS = {
@@ -162,35 +146,50 @@ class YTDLSource(discord.PCMVolumeTransformer):
     
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True):
-        """Create audio source from URL - Optimized for speed"""
+        """Create audio source from URL - Robust extraction"""
         loop = loop or asyncio.get_event_loop()
+        
+        # Add ytsearch: prefix if not a URL
+        if not url.startswith(('http://', 'https://', 'ytsearch:')):
+            url = f"ytsearch:{url}"
+        
         ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
         
-        # Use run_in_executor to prevent blocking
         def extract():
-            return ytdl.extract_info(url, download=not stream)
+            try:
+                return ytdl.extract_info(url, download=False)
+            except Exception as e:
+                print(f"Extraction error: {e}")
+                # Try with different search prefix
+                if 'ytsearch:' in url:
+                    alt_url = url.replace('ytsearch:', 'ytsearch1:')
+                    print(f"Retrying with: {alt_url}")
+                    return ytdl.extract_info(alt_url, download=False)
+                raise
         
         try:
             data = await asyncio.wait_for(
                 loop.run_in_executor(None, extract),
-                timeout=20.0  # 20 second timeout
+                timeout=30.0
             )
         except asyncio.TimeoutError:
-            print(f"⏱️ Extraction timeout for: {url}")
+            print(f"⏱️ Timeout for: {url}")
+            return None
+        except Exception as e:
+            print(f"❌ Extraction failed: {e}")
             return None
         
         if not data:
             return None
         
+        # Handle search results
         if 'entries' in data:
-            # Playlist - return entries
             entries = []
             for entry in data['entries']:
                 if entry:
                     entries.append(entry)
-            return entries
+            return entries if entries else None
         else:
-            # Single video
             return [data]
     
     @classmethod
@@ -344,9 +343,9 @@ class MusicPlayer:
             print("📭 Queue is empty, playback stopped")
     
     async def add_to_queue(self, url):
-        """Add song(s) to queue from URL or search query"""
+        """Add song(s) to queue from URL or search query - Direct streaming"""
         try:
-            print(f"🔍 Fetching: {url}")
+            print(f"🔍 Fetching stream URL for: {url}")
             entries = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
             
             if not entries:
@@ -355,7 +354,7 @@ class MusicPlayer:
             
             added_songs = []
             for entry in entries:
-                # Get the actual audio URL
+                # Get the direct streaming URL
                 audio_url = entry.get('url')
                 webpage_url = entry.get('webpage_url')
                 
@@ -364,13 +363,13 @@ class MusicPlayer:
                     continue
                 
                 song_info = {
-                    'filename': audio_url,
-                    'data': entry  # Store full data including webpage_url for refresh
+                    'filename': audio_url,  # Direct streaming URL from YouTube
+                    'data': entry
                 }
                 self.queue.add(song_info)
                 title = entry.get('title', 'Unknown')
                 added_songs.append(title)
-                print(f"✅ Added to queue: {title}")
+                print(f"✅ Added to queue (direct stream): {title}")
             
             return added_songs
         except Exception as e:
@@ -782,7 +781,7 @@ async def play_command(interaction: discord.Interaction, query: str):
         return
     
     # Send immediate response
-    await interaction.response.send_message("🔍 Searching... Please wait.", ephemeral=False)
+    await interaction.response.send_message("🔍 Searching YouTube...", ephemeral=False)
     
     voice_channel = interaction.user.voice.channel
     player = get_music_player(interaction.guild.id)
@@ -804,14 +803,16 @@ async def play_command(interaction: discord.Interaction, query: str):
     
     # Add to queue asynchronously
     try:
-        # If not a URL, search YouTube
+        # Format query properly - don't add prefix if already a URL
+        search_query = query
         if not query.startswith(('http://', 'https://')):
-            query = f"ytsearch1:{query}"
+            # Just pass the raw search query
+            search_query = query
         
-        added_songs = await player.add_to_queue(query)
+        added_songs = await player.add_to_queue(search_query)
         
         if not added_songs:
-            await interaction.edit_original_response(content="❌ Failed to add song to queue. The video might be unavailable or restricted.")
+            await interaction.edit_original_response(content="❌ Could not find any results. Try:\n• Different search terms\n• Direct YouTube URL\n• More specific artist/song name")
             return
         
         # Create embed
@@ -839,12 +840,12 @@ async def play_command(interaction: discord.Interaction, query: str):
             await player.play_next()
             
     except asyncio.TimeoutError:
-        await interaction.edit_original_response(content="❌ Request timed out. YouTube might be slow. Please try again.")
+        await interaction.edit_original_response(content="❌ Search timed out. YouTube might be slow. Please try again.")
     except Exception as e:
         print(f"❌ Play command error: {e}")
         import traceback
         traceback.print_exc()
-        await interaction.edit_original_response(content=f"❌ Error: Could not fetch video. Try a different song.")
+        await interaction.edit_original_response(content=f"❌ Error: Could not process request. Try a direct YouTube URL or update yt-dlp:\n`pip install --upgrade yt-dlp`")
 
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause_command(interaction: discord.Interaction):
