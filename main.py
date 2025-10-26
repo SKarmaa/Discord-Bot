@@ -22,6 +22,15 @@ from discord import app_commands
 from dotenv import load_dotenv
 import pytz
 
+# Music-related imports
+try:
+    import yt_dlp as youtube_dl
+    YTDL_AVAILABLE = True
+    print("✅ yt-dlp imported successfully")
+except ImportError:
+    print("❌ yt-dlp not found. Install with: pip install yt-dlp")
+    YTDL_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -29,6 +38,7 @@ load_dotenv()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.voice_states = True  # Required for voice channel functionality
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
@@ -44,6 +54,335 @@ AI_TRIGGER_PHRASE = "oh kp baa"  # AI Trigger phrase
 AI_USER_COOLDOWNS = {}  # Track user cooldowns
 AI_COOLDOWN_MINUTES = 5  # Cooldown time in minutes
 GEMINI_API_KEY = None
+
+# Music Player Configuration
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'extractaudio': True,
+    'audioformat': 'mp3',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': False,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'ytsearch',
+    'source_address': '0.0.0.0',
+    'extract_flat': False,  # Changed from 'in_playlist'
+    'force_generic_extractor': False,
+    'cachedir': False,
+    'age_limit': None,
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+FFMPEG_OPTIONS_WITH_VOLUME = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -filter:a "volume=0.5"'
+}
+
+class MusicQueue:
+    """Manages music queue for a guild"""
+    
+    def __init__(self):
+        self.songs = []
+        self.current = None
+        self.loop = False
+        self.volume = 0.5
+    
+    def add(self, song):
+        """Add a song to queue"""
+        self.songs.append(song)
+    
+    def next(self):
+        """Get next song"""
+        if self.loop and self.current:
+            return self.current
+        if self.songs:
+            self.current = self.songs.pop(0)
+            return self.current
+        self.current = None
+        return None
+    
+    def clear(self):
+        """Clear the queue"""
+        self.songs = []
+        self.current = None
+    
+    def shuffle(self):
+        """Shuffle the queue"""
+        random.shuffle(self.songs)
+    
+    def remove(self, index):
+        """Remove song at index"""
+        if 0 <= index < len(self.songs):
+            return self.songs.pop(index)
+        return None
+    
+    def __len__(self):
+        return len(self.songs)
+
+class YTDLSource(discord.PCMVolumeTransformer):
+    """YouTube audio source"""
+    
+    def __init__(self, source, *, data, volume=0.25):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title')
+        self.url = data.get('url')
+        self.webpage_url = data.get('webpage_url')
+        self.duration = data.get('duration')
+        self.thumbnail = data.get('thumbnail')
+        self.uploader = data.get('uploader')
+    
+    @classmethod
+    async def from_url(cls, url, *, loop=None, stream=True):
+        """Create audio source from URL"""
+        loop = loop or asyncio.get_event_loop()
+        ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
+        
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        
+        if 'entries' in data:
+            # Playlist
+            entries = []
+            for entry in data['entries']:
+                if entry:
+                    entries.append(entry)
+            return entries
+        else:
+            # Single video
+            filename = data['url'] if stream else ytdl.prepare_filename(data)
+            return [{'filename': filename, 'data': data}]
+    
+    @classmethod
+    async def create_source(cls, data, *, loop=None, volume=0.5):
+        """Create audio source from data"""
+        loop = loop or asyncio.get_event_loop()
+        
+        try:
+            filename = data['filename']
+            
+            # Log the URL being played for debugging
+            print(f"Creating audio source from: {filename[:100]}...")
+            
+            # Create FFmpeg audio source
+            source = discord.FFmpegPCMAudio(
+                filename,
+                **FFMPEG_OPTIONS
+            )
+            
+            return cls(source, data=data['data'], volume=volume)
+        except Exception as e:
+            print(f"Error creating audio source: {e}")
+            raise
+
+class MusicPlayer:
+    """Music player for each guild"""
+    
+    def __init__(self, bot, guild_id):
+        self.bot = bot
+        self.guild_id = guild_id
+        self.queue = MusicQueue()
+        self.current_source = None
+        self.voice_client = None
+        self.is_playing = False
+        self.is_paused = False
+        self.skip_requested = False
+        self.last_channel = None  # Store last voice channel for reconnection
+        
+    async def ensure_voice_connection(self):
+        """Ensure voice client is connected, attempt reconnection if needed"""
+        if self.voice_client and self.voice_client.is_connected():
+            return True
+        
+        if self.last_channel:
+            try:
+                print(f"🔄 Attempting to reconnect to voice channel...")
+                self.voice_client = await self.last_channel.connect()
+                print(f"✅ Reconnected to voice channel")
+                return True
+            except Exception as e:
+                print(f"❌ Failed to reconnect: {e}")
+                return False
+        
+        return False
+        
+    async def play_next(self):
+        """Play next song in queue with error recovery"""
+        if self.skip_requested:
+            self.skip_requested = False
+        
+        # Check if voice client is still valid
+        if not self.voice_client or not self.voice_client.is_connected():
+            print("Voice client disconnected, stopping playback")
+            self.is_playing = False
+            self.current_source = None
+            return
+        
+        song_data = self.queue.next()
+        
+        if song_data:
+            max_retries = 3
+            retry_count = 0
+            
+            while retry_count < max_retries:
+                try:
+                    # Re-fetch the audio URL to avoid expiration issues
+                    if retry_count > 0:
+                        print(f"Retry attempt {retry_count}/{max_retries} for: {song_data['data'].get('title', 'Unknown')}")
+                        await asyncio.sleep(2)
+                        
+                        # Re-extract the URL
+                        ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
+                        video_url = song_data['data'].get('webpage_url')
+                        if video_url:
+                            fresh_data = await self.bot.loop.run_in_executor(
+                                None, 
+                                lambda: ytdl.extract_info(video_url, download=False)
+                            )
+                            song_data['filename'] = fresh_data.get('url')
+                            song_data['data'] = fresh_data
+                    
+                    self.current_source = await YTDLSource.create_source(
+                        song_data, 
+                        loop=self.bot.loop, 
+                        volume=self.queue.volume
+                    )
+                    
+                    def after_playing(error):
+                        if error:
+                            print(f"Player error: {error}")
+                            # Check if it's a known retriable error
+                            error_str = str(error).lower()
+                            if any(x in error_str for x in ['connection', 'timeout', 'reset']):
+                                print("Network error detected, will retry next song")
+                        
+                        # Schedule the next song
+                        coro = self.play_next()
+                        future = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
+                        try:
+                            future.result(timeout=5)
+                        except asyncio.TimeoutError:
+                            print("Timeout scheduling next song")
+                        except Exception as e:
+                            print(f"Error in after_playing callback: {e}")
+                    
+                    self.voice_client.play(
+                        self.current_source,
+                        after=after_playing
+                    )
+                    
+                    self.is_playing = True
+                    self.is_paused = False
+                    
+                    print(f"✅ Now playing: {song_data['data'].get('title', 'Unknown')}")
+                    break  # Success, exit retry loop
+                    
+                except Exception as e:
+                    retry_count += 1
+                    print(f"❌ Error playing song (attempt {retry_count}/{max_retries}): {e}")
+                    
+                    if retry_count >= max_retries:
+                        print(f"Failed to play after {max_retries} attempts, skipping to next song")
+                        import traceback
+                        traceback.print_exc()
+                        # Try next song after max retries
+                        await asyncio.sleep(2)
+                        await self.play_next()
+                        return
+        else:
+            self.is_playing = False
+            self.current_source = None
+            print("📭 Queue is empty, playback stopped")
+    
+    async def add_to_queue(self, url):
+        """Add song(s) to queue from URL or search query"""
+        try:
+            print(f"🔍 Fetching: {url}")
+            entries = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
+            
+            if not entries:
+                print("❌ No entries returned from yt-dlp")
+                return None
+            
+            added_songs = []
+            for entry in entries:
+                # Get the actual audio URL
+                audio_url = entry.get('url')
+                webpage_url = entry.get('webpage_url')
+                
+                if not audio_url:
+                    print(f"⚠️  No audio URL found for: {entry.get('title', 'Unknown')}")
+                    continue
+                
+                song_info = {
+                    'filename': audio_url,
+                    'data': entry  # Store full data including webpage_url for refresh
+                }
+                self.queue.add(song_info)
+                title = entry.get('title', 'Unknown')
+                added_songs.append(title)
+                print(f"✅ Added to queue: {title}")
+            
+            return added_songs
+        except Exception as e:
+            print(f"❌ Error adding to queue: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def pause(self):
+        """Pause playback"""
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.pause()
+            self.is_paused = True
+            return True
+        return False
+    
+    def resume(self):
+        """Resume playback"""
+        if self.voice_client and self.voice_client.is_paused():
+            self.voice_client.resume()
+            self.is_paused = False
+            return True
+        return False
+    
+    def skip(self):
+        """Skip current song"""
+        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            self.skip_requested = True
+            self.voice_client.stop()
+            return True
+        return False
+    
+    def stop(self):
+        """Stop playback and clear queue"""
+        self.queue.clear()
+        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            self.voice_client.stop()
+            return True
+        return False
+    
+    def set_volume(self, volume):
+        """Set volume (0.0 to 1.0)"""
+        self.queue.volume = max(0.0, min(1.0, volume))
+        if self.current_source:
+            self.current_source.volume = self.queue.volume
+
+# Global music players dictionary
+music_players = {}
+
+def get_music_player(guild_id):
+    """Get or create music player for guild"""
+    if guild_id not in music_players:
+        music_players[guild_id] = MusicPlayer(bot, guild_id)
+    return music_players[guild_id]
 
 class AIRateLimiter:
     """Handle rate limiting for AI queries"""
@@ -206,41 +545,56 @@ def create_default_config():
         }
     }
     
-    with open('bot_data.json', 'w', encoding='utf-8') as f:
-        json.dump(default_data, f, indent=2, ensure_ascii=False)
-    
     BOT_DATA = default_data
     WITTY_RESPONSES = default_data["witty_responses"]
     WELCOME_MESSAGES = default_data["welcome_messages"]
     CONFIG = default_data["bot_config"]
     TRIGGER_WORDS = list(WITTY_RESPONSES.keys())
+    
+    with open('bot_data.json', 'w', encoding='utf-8') as f:
+        json.dump(default_data, f, indent=2, ensure_ascii=False)
+    
+    print("✅ Created default bot_data.json")
 
 def reload_bot_data():
-    """Reload bot data"""
-    load_bot_data()
+    """Reload bot data from file"""
+    global BOT_DATA, WITTY_RESPONSES, WELCOME_MESSAGES, CONFIG, TRIGGER_WORDS
+    
+    with open('bot_data.json', 'r', encoding='utf-8') as f:
+        BOT_DATA = json.load(f)
+    
+    WITTY_RESPONSES = BOT_DATA.get("witty_responses", {})
+    WELCOME_MESSAGES = BOT_DATA.get("welcome_messages", [])
+    CONFIG = BOT_DATA.get("bot_config", {})
+    TRIGGER_WORDS = list(WITTY_RESPONSES.keys())
+
+def format_duration(seconds):
+    """Format duration in seconds to MM:SS"""
+    if not seconds:
+        return "Unknown"
+    mins = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{mins}:{secs:02d}"
 
 @bot.event
 async def on_ready():
     """Bot startup event"""
-    print(f"✅ Logged in as {bot.user.name} (ID: {bot.user.id})")
-    print(f"📚 Loaded {len(TRIGGER_WORDS)} trigger words")
-    print(f"🎉 Loaded {len(WELCOME_MESSAGES)} welcome messages")
-    print(f"🔧 Loaded {len(CONFIG)} config settings")
-    print(f"🤖 AI Trigger Phrase: '{AI_TRIGGER_PHRASE}'")
-    print(f"⏰ AI Rate Limit: 1 query per {AI_COOLDOWN_MINUTES} minutes per user")
+    print(f'✅ Logged in as {bot.user.name} (ID: {bot.user.id})')
+    print(f'Connected to {len(bot.guilds)} guilds')
+    print('------')
     
-    # Sync commands with Discord
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash commands")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
     
-    # Set bot status
-    activity = discord.Activity(type=discord.ActivityType.listening, name=f"{AI_TRIGGER_PHRASE} for AI")
-    await bot.change_presence(status=discord.Status.online, activity=activity)
-    
-    print("🚀 Bot is ready!")
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.listening,
+            name="your commands | /help"
+        )
+    )
 
 @bot.event
 async def on_member_join(member):
@@ -248,13 +602,13 @@ async def on_member_join(member):
     if not WELCOME_MESSAGES:
         return
     
-    welcome_channel_id = CONFIG.get("welcome_channel_id")
+    welcome_channel_id = CONFIG.get("welcome_channel_id", 0)
     
-    if welcome_channel_id and welcome_channel_id != 0:
+    if welcome_channel_id:
         channel = bot.get_channel(welcome_channel_id)
         if channel:
-            welcome_msg = random.choice(WELCOME_MESSAGES).format(user=member.mention)
-            await channel.send(welcome_msg)
+            message = random.choice(WELCOME_MESSAGES).format(user=member.mention)
+            await channel.send(message)
 
 @bot.event
 async def on_message(message):
@@ -262,320 +616,509 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    # Process commands first
     await bot.process_commands(message)
     
     content_lower = message.content.lower()
     
-    # Check for moderation commands FIRST (before AI trigger)
-    # Check for kick command: "oh kp baa kick @user"
-    if content_lower.startswith(f"{AI_TRIGGER_PHRASE.lower()} kick"):
-        await handle_moderation_command(message, "kick")
-        return
-    
-    # Check for ban command: "oh kp baa ban @user"
-    if content_lower.startswith(f"{AI_TRIGGER_PHRASE.lower()} ban"):
-        await handle_moderation_command(message, "ban")
-        return
-    
-    # Check for mute command: "oh kp baa mute @user"
-    if content_lower.startswith(f"{AI_TRIGGER_PHRASE.lower()} mute"):
-        await handle_moderation_command(message, "mute")
-        return
-    
-    # Check for unmute command: "oh kp baa unmute @user"
-    if content_lower.startswith(f"{AI_TRIGGER_PHRASE.lower()} unmute"):
-        await handle_moderation_command(message, "unmute")
-        return
-    
-    # NOW check for AI trigger phrase (after moderation commands)
-    if message.content.lower().startswith(AI_TRIGGER_PHRASE.lower()):
-        # Extract prompt after trigger phrase
-        prompt = message.content[len(AI_TRIGGER_PHRASE):].strip()
-        
-        if not prompt:
-            await message.reply("❓ Please provide a question after the trigger phrase!\nExample: `oh kp baa what is the weather?`")
-            return
-        
-        # Check cooldown
+    # Check if message starts with AI trigger phrase
+    if content_lower.startswith(AI_TRIGGER_PHRASE.lower()):
         user_id = message.author.id
         can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
         
         if not can_query:
             remaining_time = ai_rate_limiter.get_remaining_time(user_id)
-            await message.reply(f"⏰ Please wait **{remaining_time}** before asking again.\n*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes*")
+            await message.reply(
+                f"⏰ Please wait **{remaining_time}** before asking me another question!\n"
+                f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*"
+            )
             return
         
-        # Validate prompt length
+        prompt = message.content[len(AI_TRIGGER_PHRASE):].strip()
+        
+        if not prompt:
+            await message.reply(f"Please ask me a question!\nExample: `{AI_TRIGGER_PHRASE} what is python?`")
+            return
+        
         if len(prompt) > 500:
             await message.reply("❌ Your question is too long! Please keep it under 500 characters.")
             return
         
-        # Record query and send thinking message
-        ai_rate_limiter.record_query(user_id)
-        thinking_msg = await message.reply("🤔 *Thinking...*")
+        # Check for moderation commands
+        if any(word in prompt.lower() for word in ['kick', 'ban', 'mute', 'unmute']):
+            await handle_moderation_command(message, prompt)
+            return
         
-        try:
-            # Query Gemini API
+        ai_rate_limiter.record_query(user_id)
+        
+        async with message.channel.typing():
             response = await query_gemini_api(prompt)
             
-            # Update message with response
             if len(response) > 2000:
-                # Split long responses
-                chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
-                await thinking_msg.edit(content=f"💬 **Answer:**\n{chunks[0]}")
-                for chunk in chunks[1:]:
-                    await message.channel.send(chunk)
+                chunks = [response[i:i+1990] for i in range(0, len(response), 1990)]
+                for i, chunk in enumerate(chunks):
+                    if i == 0:
+                        await message.reply(chunk)
+                    else:
+                        await message.channel.send(chunk)
             else:
-                await thinking_msg.edit(content=f"💬 **Answer:**\n{response}")
-                
-        except Exception as e:
-            print(f"Error in AI message handler: {e}")
-            await thinking_msg.edit(content="❌ Sorry, I encountered an error while processing your question.")
-        
-        return
+                await message.reply(response)
     
-    # Handle trigger word responses
-    for trigger_word in TRIGGER_WORDS:
-        if trigger_word.lower() in message.content.lower():
-            responses = WITTY_RESPONSES.get(trigger_word, [])
+    # Check for trigger words
+    for trigger in TRIGGER_WORDS:
+        if trigger.lower() in content_lower:
+            responses = WITTY_RESPONSES.get(trigger, [])
             if responses:
-                await message.channel.send(random.choice(responses))
+                response = random.choice(responses)
+                await message.channel.send(response)
                 break
     
-    # Special reactions for Samu
-    samu_id = CONFIG.get("samu_user_id")
-    if samu_id and samu_id != 0:
-        if bot.user.mentioned_in(message) or str(samu_id) in message.content:
-            reactions = CONFIG.get("samu_tag_reactions", ["👋"])
-            for emoji in reactions:
-                try:
-                    await message.add_reaction(emoji)
-                except:
-                    pass
-    
     # Random reactions
-    if random.random() < 0.01:
-        general_reactions = CONFIG.get("general_reactions", ["😊"])
-        try:
-            await message.add_reaction(random.choice(general_reactions))
-        except:
-            pass
-
-async def handle_moderation_command(message, action: str):
-    """Handle kick, ban, mute, and unmute commands from text messages"""
-    # Check if user has permissions
-    if not message.author.guild_permissions.kick_members and action in ["kick", "mute", "unmute"]:
-        await message.reply(f"Muji ta ko hos ra!")
-        return
-    
-    if not message.author.guild_permissions.ban_members and action == "ban":
-        await message.reply("Muji ta ko hos ra!")
-        return
-    
-    # Extract mentioned users
-    if not message.mentions:
-        await message.reply(f"Kaslai {action}?")
-        return
-    
-    target = message.mentions[0]
-    
-    # Check if target is the bot itself
-    if target == bot.user:
-        await message.reply(f"Chuss mero!")
-        return
-    
-    # Check if target is the command author
-    if target == message.author:
-        await message.reply(f"Who hurt you baby")
-        return
-    
-    # Check role hierarchy (except for unmute)
-    if action != "unmute":
-        if message.guild.owner != message.author:
-            if target.top_role >= message.author.top_role:
-                await message.reply(f"Aukat ma bas muji!")
-                return
+    if random.random() < 0.15:
+        samu_id = CONFIG.get("samu_user_id", 0)
         
-        # Check if bot can perform the action
-        if target.top_role >= message.guild.me.top_role:
-            await message.reply(f"Mero aukat pugena :(")
-            return
+        if samu_id and message.author.id == samu_id:
+            reactions = CONFIG.get("samu_tag_reactions", ["👋"])
+        else:
+            reactions = CONFIG.get("general_reactions", ["😊"])
+        
+        if reactions:
+            try:
+                await message.add_reaction(random.choice(reactions))
+            except:
+                pass
+
+async def handle_moderation_command(message, prompt):
+    """Handle moderation commands through AI"""
+    if not message.author.guild_permissions.moderate_members:
+        await message.reply("❌ You don't have permission to use moderation commands!")
+        return
     
-    # Extract reason (everything after the mention)
-    words = message.content.split()
-    reason_start = -1
-    for i, word in enumerate(words):
-        if word.startswith('<@') and word.endswith('>'):
-            reason_start = i + 1
-            break
+    mentioned_users = message.mentions
+    if not mentioned_users:
+        await message.reply("❌ Please mention a user to moderate!")
+        return
     
-    reason = " ".join(words[reason_start:]) if reason_start > 0 and reason_start < len(words) else "Manmarji"
+    target = mentioned_users[0]
+    reason = re.sub(r'(kick|ban|mute|unmute)\s*<@!?\d+>\s*', '', prompt, flags=re.IGNORECASE).strip() or "No reason provided"
     
     try:
-        if action == "kick":
-            await target.kick(reason=f"Kicked by {message.author} | {reason}")
-            gif_url = "https://tenor.com/view/talakjung-v-tulke-bhag-muji-na-farkis-talke-gif-10907239385633824846"
-            await message.reply(f"**{target}** khais chickne.\n**Reason:** {reason}\n\n{gif_url}")
+        if 'kick' in prompt.lower():
+            await target.kick(reason=reason)
+            await message.reply(f"✅ Kicked {target.mention}. Reason: {reason}")
         
-        elif action == "ban":
-            await target.ban(reason=f"Banned by {message.author} | {reason}")
-            gif_url = "https://tenor.com/view/talakjung-v-tulke-bhag-muji-na-farkis-talke-gif-10907239385633824846"
-            await message.reply(f"**{target}** khais chickne.\n**Reason:** {reason}\n\n{gif_url}")
+        elif 'ban' in prompt.lower():
+            await target.ban(reason=reason)
+            await message.reply(f"✅ Banned {target.mention}. Reason: {reason}")
         
-        elif action == "mute":
-            # Timeout for 5 minutes
-            await target.timeout(timedelta(minutes=5), reason=f"Muted by {message.author} | {reason}")
-            await message.reply(f"**{target}** ekchin chuplag muji.\n**Reason:** {reason}")
+        elif 'mute' in prompt.lower():
+            duration = timedelta(minutes=5)
+            await target.timeout(duration, reason=reason)
+            await message.reply(f"✅ Muted {target.mention} for 5 minutes. Reason: {reason}")
         
-        elif action == "unmute":
-            # Remove timeout
-            await target.timeout(None, reason=f"Unmuted by {message.author} | {reason}")
-            await message.reply(f"**{target}** la bol aba.\n**Reason:** {reason}")
-        
-        # Log the action
-        print(f"[MODERATION] {action.upper()}: {target} ({target.id}) by {message.author} ({message.author.id}) - Reason: {reason}")
-        
+        elif 'unmute' in prompt.lower():
+            await target.timeout(None, reason=reason)
+            await message.reply(f"✅ Unmuted {target.mention}")
+    
     except discord.Forbidden:
-        await message.reply(f"❌ I don't have permission to {action} this user!")
-    except discord.HTTPException as e:
-        await message.reply(f"❌ Failed to {action} the user: {str(e)}")
+        await message.reply("❌ I don't have permission to do that!")
     except Exception as e:
-        await message.reply(f"❌ An error occurred: {str(e)}")
-        print(f"Error in {action} command: {e}")
+        await message.reply(f"❌ Error: {str(e)}")
 
-# Slash Commands
-@bot.tree.command(name="kpwrite", description="Send a message as KP (authorized users only)")
-@app_commands.describe(message="The message to send")
-async def kpwrite_command(interaction: discord.Interaction, message: str):
-    """Send message as KP"""
-    authorized_user_id = CONFIG.get("write_command_user_id")
-    target_channel_id = CONFIG.get("write_command_channel_id")
-    
-    if not authorized_user_id or authorized_user_id == 0:
-        await interaction.response.send_message("❌ This command is not configured!", ephemeral=True)
-        return
-    
-    if interaction.user.id != authorized_user_id:
-        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
-        return
-    
-    if not target_channel_id or target_channel_id == 0:
-        await interaction.response.send_message("❌ Target channel not configured!", ephemeral=True)
-        return
-    
-    channel = bot.get_channel(target_channel_id)
-    if not channel:
-        await interaction.response.send_message("❌ Target channel not found!", ephemeral=True)
-        return
-    
-    try:
-        await channel.send(message)
-        await interaction.response.send_message(f"✅ Message sent to {channel.mention}!", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to send message: {str(e)}", ephemeral=True)
+# ==================== MUSIC COMMANDS ====================
 
-@bot.tree.command(name="kpannounce", description="Send an announcement (authorized users only)")
-@app_commands.describe(message="The announcement message")
-async def kpannounce_command(interaction: discord.Interaction, message: str):
-    """Send announcement"""
-    authorized_user_id = CONFIG.get("write_command_user_id")
-    target_channel_id = CONFIG.get("general_channel_id")
-    
-    if not authorized_user_id or authorized_user_id == 0:
-        await interaction.response.send_message("❌ This command is not configured!", ephemeral=True)
+@bot.tree.command(name="play", description="Play a song from YouTube (URL or search query)")
+@app_commands.describe(query="YouTube URL or song name to search")
+async def play_command(interaction: discord.Interaction, query: str):
+    """Play music in voice channel"""
+    if not YTDL_AVAILABLE:
+        await interaction.response.send_message("❌ Music feature not available. Install yt-dlp: `pip install yt-dlp`")
         return
     
-    if interaction.user.id != authorized_user_id:
-        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
-        return
-    
-    if not target_channel_id or target_channel_id == 0:
-        await interaction.response.send_message("❌ Target channel not configured!", ephemeral=True)
-        return
-    
-    channel = bot.get_channel(target_channel_id)
-    if not channel:
-        await interaction.response.send_message("❌ Target channel not found!", ephemeral=True)
-        return
-    
-    announcement = f"📢 **Announcement** 📢\n\n{message}\n\n— Management"
-    
-    try:
-        await channel.send(announcement)
-        await interaction.response.send_message(f"✅ Announcement sent to {channel.mention}!", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to send announcement: {str(e)}", ephemeral=True)
-
-@bot.tree.command(name="kpprotest", description="Send a protest message (authorized users only)")
-async def kpprotest_command(interaction: discord.Interaction):
-    """Send protest message"""
-    authorized_user_id = CONFIG.get("write_command_user_id")
-    target_channel_id = CONFIG.get("general_channel_id")
-    
-    if not authorized_user_id or authorized_user_id == 0:
-        await interaction.response.send_message("❌ This command is not configured!", ephemeral=True)
-        return
-    
-    if interaction.user.id != authorized_user_id:
-        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
-        return
-    
-    if not target_channel_id or target_channel_id == 0:
-        await interaction.response.send_message("❌ Target channel not configured!", ephemeral=True)
-        return
-    
-    channel = bot.get_channel(target_channel_id)
-    if not channel:
-        await interaction.response.send_message("❌ Target channel not found!", ephemeral=True)
-        return
-    
-    protest = "🚨 **PROTEST** 🚨\n\nThis is an official protest message!\n\n— KP Bot"
-    
-    try:
-        await channel.send(protest)
-        await interaction.response.send_message(f"✅ Protest sent to {channel.mention}!", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to send protest: {str(e)}", ephemeral=True)
-
-@bot.tree.command(name="ai", description="Ask KP a question (rate limited)")
-@app_commands.describe(prompt="Your question for KP")
-async def ai_command(interaction: discord.Interaction, prompt: str):
-    """AI slash command with rate limiting"""
     await interaction.response.defer()
     
+    # Check if user is in voice channel
+    if not interaction.user.voice:
+        await interaction.followup.send("❌ You need to be in a voice channel to play music!")
+        return
+    
+    voice_channel = interaction.user.voice.channel
+    player = get_music_player(interaction.guild.id)
+    
+    # Store the voice channel for potential reconnection
+    player.last_channel = voice_channel
+    
+    # Connect to voice channel if not already connected
+    if not player.voice_client or not player.voice_client.is_connected():
+        try:
+            player.voice_client = await voice_channel.connect()
+            print(f"🔊 Connected to voice channel: {voice_channel.name}")
+        except Exception as e:
+            await interaction.followup.send(f"❌ Failed to connect to voice channel: {str(e)}")
+            return
+    elif player.voice_client.channel != voice_channel:
+        await player.voice_client.move_to(voice_channel)
+        print(f"🔄 Moved to voice channel: {voice_channel.name}")
+    
+    # Add to queue
     try:
-        user_id = interaction.user.id
+        # If not a URL, search YouTube
+        if not query.startswith(('http://', 'https://')):
+            query = f"ytsearch1:{query}"
         
-        # Check cooldown
-        can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+        added_songs = await player.add_to_queue(query)
         
-        if not can_query:
-            remaining_time = ai_rate_limiter.get_remaining_time(user_id)
-            await interaction.followup.send(
-                f"⏰ Please wait **{remaining_time}** before asking again.\n*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*"
+        if not added_songs:
+            await interaction.followup.send("❌ Failed to add song to queue. Please try again.")
+            return
+        
+        # Create embed
+        if len(added_songs) == 1:
+            embed = discord.Embed(
+                title="🎵 Added to Queue",
+                description=f"**{added_songs[0]}**",
+                color=discord.Color.green()
             )
-            return
+            if player.is_playing:
+                embed.set_footer(text=f"Position in queue: {len(player.queue)}")
+            else:
+                embed.set_footer(text="Playing now!")
+        else:
+            embed = discord.Embed(
+                title="🎵 Playlist Added to Queue",
+                description=f"Added **{len(added_songs)}** songs",
+                color=discord.Color.green()
+            )
         
-        # Validate prompt
-        if len(prompt) > 500:
-            await interaction.followup.send("❌ Your question is too long! Please keep it under 500 characters.")
-            return
+        await interaction.followup.send(embed=embed)
         
-        # Record query
-        ai_rate_limiter.record_query(user_id)
+        # Start playing if not already playing
+        if not player.is_playing and not player.is_paused:
+            await player.play_next()
+            
+    except Exception as e:
+        print(f"❌ Play command error: {e}")
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+
+@bot.tree.command(name="pause", description="Pause the current song")
+async def pause_command(interaction: discord.Interaction):
+    """Pause music playback"""
+    player = get_music_player(interaction.guild.id)
+    
+    if player.pause():
+        await interaction.response.send_message("⏸️ Paused playback")
+    else:
+        await interaction.response.send_message("❌ Nothing is playing!")
+
+@bot.tree.command(name="resume", description="Resume the paused song")
+async def resume_command(interaction: discord.Interaction):
+    """Resume music playback"""
+    player = get_music_player(interaction.guild.id)
+    
+    if player.resume():
+        await interaction.response.send_message("▶️ Resumed playback")
+    else:
+        await interaction.response.send_message("❌ Nothing is paused!")
+
+@bot.tree.command(name="skip", description="Skip the current song")
+async def skip_command(interaction: discord.Interaction):
+    """Skip current song"""
+    player = get_music_player(interaction.guild.id)
+    
+    if player.skip():
+        await interaction.response.send_message("⏭️ Skipped current song")
+    else:
+        await interaction.response.send_message("❌ Nothing is playing!")
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue")
+async def stop_command(interaction: discord.Interaction):
+    """Stop music and clear queue"""
+    player = get_music_player(interaction.guild.id)
+    
+    if player.stop():
+        await interaction.response.send_message("⏹️ Stopped playback and cleared queue")
+    else:
+        await interaction.response.send_message("❌ Nothing is playing!")
+
+@bot.tree.command(name="queue", description="Show the music queue")
+async def queue_command(interaction: discord.Interaction):
+    """Display music queue"""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.current_source and len(player.queue) == 0:
+        await interaction.response.send_message("📭 Queue is empty!")
+        return
+    
+    embed = discord.Embed(
+        title="🎵 Music Queue",
+        color=discord.Color.blue()
+    )
+    
+    # Current song
+    if player.current_source:
+        current = player.current_source.data
+        duration = format_duration(current.get('duration'))
+        status = "⏸️ Paused" if player.is_paused else "▶️ Playing"
+        embed.add_field(
+            name=f"{status} - Now",
+            value=f"**{current.get('title', 'Unknown')}**\nDuration: {duration}",
+            inline=False
+        )
+    
+    # Queue
+    if len(player.queue) > 0:
+        queue_text = ""
+        for i, song in enumerate(player.queue.songs[:10], 1):
+            title = song['data'].get('title', 'Unknown')
+            duration = format_duration(song['data'].get('duration'))
+            queue_text += f"`{i}.` **{title}** ({duration})\n"
         
-        # Query Gemini
+        if len(player.queue) > 10:
+            queue_text += f"\n*...and {len(player.queue) - 10} more songs*"
+        
+        embed.add_field(
+            name=f"Up Next ({len(player.queue)} songs)",
+            value=queue_text,
+            inline=False
+        )
+    
+    embed.set_footer(text=f"Loop: {'✅ Enabled' if player.queue.loop else '❌ Disabled'}")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="nowplaying", description="Show currently playing song")
+async def nowplaying_command(interaction: discord.Interaction):
+    """Show current song"""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.current_source:
+        await interaction.response.send_message("❌ Nothing is playing!")
+        return
+    
+    current = player.current_source.data
+    
+    embed = discord.Embed(
+        title="🎵 Now Playing",
+        description=f"**{current.get('title', 'Unknown')}**",
+        color=discord.Color.green()
+    )
+    
+    if current.get('thumbnail'):
+        embed.set_thumbnail(url=current['thumbnail'])
+    
+    embed.add_field(name="Duration", value=format_duration(current.get('duration')), inline=True)
+    embed.add_field(name="Uploader", value=current.get('uploader', 'Unknown'), inline=True)
+    embed.add_field(name="Status", value="⏸️ Paused" if player.is_paused else "▶️ Playing", inline=True)
+    
+    if current.get('webpage_url'):
+        embed.add_field(name="URL", value=f"[Watch on YouTube]({current['webpage_url']})", inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="volume", description="Set the playback volume (0-100)")
+@app_commands.describe(level="Volume level (0-100)")
+async def volume_command(interaction: discord.Interaction, level: int):
+    """Set volume"""
+    if not 0 <= level <= 100:
+        await interaction.response.send_message("❌ Volume must be between 0 and 100!")
+        return
+    
+    player = get_music_player(interaction.guild.id)
+    player.set_volume(level / 100)
+    
+    await interaction.response.send_message(f"🔊 Volume set to {level}%")
+
+@bot.tree.command(name="loop", description="Toggle loop mode for current song")
+async def loop_command(interaction: discord.Interaction):
+    """Toggle loop mode"""
+    player = get_music_player(interaction.guild.id)
+    player.queue.loop = not player.queue.loop
+    
+    status = "✅ enabled" if player.queue.loop else "❌ disabled"
+    await interaction.response.send_message(f"🔁 Loop mode {status}")
+
+@bot.tree.command(name="shuffle", description="Shuffle the queue")
+async def shuffle_command(interaction: discord.Interaction):
+    """Shuffle queue"""
+    player = get_music_player(interaction.guild.id)
+    
+    if len(player.queue) < 2:
+        await interaction.response.send_message("❌ Not enough songs in queue to shuffle!")
+        return
+    
+    player.queue.shuffle()
+    await interaction.response.send_message("🔀 Queue shuffled!")
+
+@bot.tree.command(name="remove", description="Remove a song from queue")
+@app_commands.describe(position="Position in queue (1, 2, 3...)")
+async def remove_command(interaction: discord.Interaction, position: int):
+    """Remove song from queue"""
+    player = get_music_player(interaction.guild.id)
+    
+    if position < 1 or position > len(player.queue):
+        await interaction.response.send_message(f"❌ Invalid position! Queue has {len(player.queue)} songs.")
+        return
+    
+    removed = player.queue.remove(position - 1)
+    if removed:
+        await interaction.response.send_message(f"✅ Removed **{removed['data'].get('title', 'Unknown')}** from queue")
+    else:
+        await interaction.response.send_message("❌ Failed to remove song!")
+
+@bot.tree.command(name="clear", description="Clear the entire queue")
+async def clear_command(interaction: discord.Interaction):
+    """Clear queue"""
+    player = get_music_player(interaction.guild.id)
+    
+    if len(player.queue) == 0:
+        await interaction.response.send_message("❌ Queue is already empty!")
+        return
+    
+    count = len(player.queue)
+    player.queue.clear()
+    await interaction.response.send_message(f"🗑️ Cleared {count} songs from queue")
+
+@bot.tree.command(name="leave", description="Make the bot leave the voice channel")
+async def leave_command(interaction: discord.Interaction):
+    """Disconnect from voice"""
+    player = get_music_player(interaction.guild.id)
+    
+    if player.voice_client and player.voice_client.is_connected():
+        player.stop()
+        await player.voice_client.disconnect()
+        await interaction.response.send_message("👋 Left voice channel")
+    else:
+        await interaction.response.send_message("❌ Not connected to a voice channel!")
+
+# ==================== EXISTING COMMANDS ====================
+
+@bot.tree.command(name="kpwrite", description="Send a message to the general channel")
+@app_commands.describe(message="Message to send")
+async def kpwrite_command(interaction: discord.Interaction, message: str):
+    """Send message as bot (authorized users only)"""
+    authorized_user_id = CONFIG.get("write_command_user_id", 0)
+    
+    if interaction.user.id != authorized_user_id:
+        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
+        return
+    
+    channel_id = CONFIG.get("write_command_channel_id", 0)
+    
+    if not channel_id:
+        await interaction.response.send_message("❌ Write channel not configured!", ephemeral=True)
+        return
+    
+    channel = bot.get_channel(channel_id)
+    
+    if channel:
+        await channel.send(message)
+        await interaction.response.send_message("✅ Message sent!", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
+
+@bot.tree.command(name="kpannounce", description="Send an announcement message")
+@app_commands.describe(message="Announcement message")
+async def kpannounce_command(interaction: discord.Interaction, message: str):
+    """Send announcement (authorized users only)"""
+    authorized_user_id = CONFIG.get("write_command_user_id", 0)
+    
+    if interaction.user.id != authorized_user_id:
+        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
+        return
+    
+    general_channel_id = CONFIG.get("general_channel_id", 0)
+    
+    if not general_channel_id:
+        await interaction.response.send_message("❌ General channel not configured!", ephemeral=True)
+        return
+    
+    channel = bot.get_channel(general_channel_id)
+    
+    if channel:
+        embed = discord.Embed(
+            title="📢 Announcement",
+            description=message,
+            color=discord.Color.blue()
+        )
+        await channel.send(embed=embed)
+        await interaction.response.send_message("✅ Announcement sent!", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
+
+@bot.tree.command(name="kpprotest", description="Send the protest message")
+async def kpprotest_command(interaction: discord.Interaction):
+    """Send protest message (authorized users only)"""
+    authorized_user_id = CONFIG.get("write_command_user_id", 0)
+    
+    if interaction.user.id != authorized_user_id:
+        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
+        return
+    
+    general_channel_id = CONFIG.get("general_channel_id", 0)
+    
+    if not general_channel_id:
+        await interaction.response.send_message("❌ General channel not configured!", ephemeral=True)
+        return
+    
+    channel = bot.get_channel(general_channel_id)
+    
+    if channel:
+        protest_message = """@everyone 
+
+**बहिष्कार गर्नुहोस् वा कारवाही भोग्नुहोस्** 🚨
+
+यदि तपाईंले भोलि बहिष्कार गर्नुभएन भने तपाईं यस सर्भरबाट permanently ban हुनेछ।
+
+यो कुनै मजाक होइन। हामी गम्भीर छौं। 🔥
+
+**बहिष्कार गर:** भोलि
+**समय:** पूरा दिन
+**कारण:** परीक्षा protest
+
+सबैले पालना गर्नु अनिवार्य छ। 💪"""
+        
+        await channel.send(protest_message)
+        await interaction.response.send_message("✅ Protest message sent!", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
+
+@bot.tree.command(name="ai", description="Ask AI a question")
+@app_commands.describe(prompt="Your question for AI")
+async def ai_command(interaction: discord.Interaction, prompt: str):
+    """AI query via slash command"""
+    user_id = interaction.user.id
+    can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+    
+    if not can_query:
+        remaining_time = ai_rate_limiter.get_remaining_time(user_id)
+        await interaction.response.send_message(
+            f"⏰ Please wait **{remaining_time}** before asking another question!\n"
+            f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*",
+            ephemeral=True
+        )
+        return
+    
+    if len(prompt) > 500:
+        await interaction.response.send_message(
+            "❌ Your question is too long! Please keep it under 500 characters.",
+            ephemeral=True
+        )
+        return
+    
+    await interaction.response.defer()
+    
+    ai_rate_limiter.record_query(user_id)
+    
+    try:
         response = await query_gemini_api(prompt)
         
-        # Send response
         if len(response) > 2000:
-            chunks = [response[i:i+1900] for i in range(0, len(response), 1900)]
-            await interaction.followup.send(f"💬 **Answer:**\n{chunks[0]}")
-            for chunk in chunks[1:]:
+            await interaction.followup.send(response[:1990] + "...")
+            chunks = [response[i:i+1990] for i in range(1990, len(response), 1990)]
+            for chunk in chunks:
                 await interaction.channel.send(chunk)
         else:
-            await interaction.followup.send(f"💬 **Answer:**\n{response}")
+            await interaction.followup.send(response)
             
     except Exception as e:
         print(f"Error in AI slash command: {e}")
@@ -698,6 +1241,21 @@ async def help_command(ctx):
     """Show help information"""
     help_text = f"""**Discord Bot Commands:**
 
+**Music Commands:**
+• `/play <song>` - Play a song (YouTube URL or search)
+• `/pause` - Pause playback
+• `/resume` - Resume playback
+• `/skip` - Skip current song
+• `/stop` - Stop and clear queue
+• `/queue` - Show music queue
+• `/nowplaying` - Show current song
+• `/volume <0-100>` - Set volume
+• `/loop` - Toggle loop mode
+• `/shuffle` - Shuffle queue
+• `/remove <position>` - Remove song from queue
+• `/clear` - Clear queue
+• `/leave` - Leave voice channel
+
 **Slash Commands:**
 • `/ping` - Check bot status
 • `/date` - Get current date/time
@@ -774,6 +1332,11 @@ def main():
         print()
         print("Or set the TOKEN and GEMINI_API_KEY environment variables")
         return
+    
+    if not YTDL_AVAILABLE:
+        print("⚠️  WARNING: yt-dlp not installed!")
+        print("Music features will not work. Install with: pip install yt-dlp")
+        print()
     
     try:
         print("🚀 Starting Discord Bot...")
