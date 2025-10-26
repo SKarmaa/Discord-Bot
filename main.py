@@ -57,9 +57,9 @@ GEMINI_API_KEY = None
 
 # Music Player Configuration
 YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[acodec=opus]/bestaudio[ext=webm][acodec=opus]/bestaudio/best',
     'extractaudio': True,
-    'audioformat': 'mp3',
+    'audioformat': 'opus',
     'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
     'restrictfilenames': True,
     'noplaylist': False,
@@ -70,20 +70,40 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'extract_flat': False,  # Changed from 'in_playlist'
+    'extract_flat': False,
     'force_generic_extractor': False,
     'cachedir': False,
     'age_limit': None,
+    'socket_timeout': 10,
+    'retries': 2,
+    'fragment_retries': 2,
+    'skip_unavailable_fragments': True,
+    'keepvideo': False,
+    'prefer_free_formats': False,  # Changed to False to get best quality
+    'youtube_include_dash_manifest': False,
+    'youtube_include_hls_manifest': False,
+    'extractor_args': {
+        'youtube': {
+            'skip': ['hls', 'dash', 'translated_subs'],
+            'player_client': ['android', 'web'],
+        }
+    },
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'opus',
+        'preferredquality': '160',
+    }],
 }
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+    'options': '-vn -af "loudnorm=I=-16:TP=-1.5:LRA=11, acompressor=threshold=0.089:ratio=9:attack=200:release=1000, equalizer=f=100:width_type=h:width=200:g=2, equalizer=f=3000:width_type=h:width=1000:g=-2"'
 }
 
-FFMPEG_OPTIONS_WITH_VOLUME = {
+# Simpler options for compatibility (fallback)
+FFMPEG_OPTIONS_SIMPLE = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a "volume=0.5"'
+    'options': '-vn -af "loudnorm=I=-16:TP=-1.5:LRA=11"'
 }
 
 class MusicQueue:
@@ -93,7 +113,7 @@ class MusicQueue:
         self.songs = []
         self.current = None
         self.loop = False
-        self.volume = 0.5
+        self.volume = 1.0  # Set to 1.0 since FFmpeg handles normalization
     
     def add(self, song):
         """Add a song to queue"""
@@ -142,14 +162,28 @@ class YTDLSource(discord.PCMVolumeTransformer):
     
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True):
-        """Create audio source from URL"""
+        """Create audio source from URL - Optimized for speed"""
         loop = loop or asyncio.get_event_loop()
         ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
         
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+        # Use run_in_executor to prevent blocking
+        def extract():
+            return ytdl.extract_info(url, download=not stream)
+        
+        try:
+            data = await asyncio.wait_for(
+                loop.run_in_executor(None, extract),
+                timeout=20.0  # 20 second timeout
+            )
+        except asyncio.TimeoutError:
+            print(f"⏱️ Extraction timeout for: {url}")
+            return None
+        
+        if not data:
+            return None
         
         if 'entries' in data:
-            # Playlist
+            # Playlist - return entries
             entries = []
             for entry in data['entries']:
                 if entry:
@@ -157,12 +191,11 @@ class YTDLSource(discord.PCMVolumeTransformer):
             return entries
         else:
             # Single video
-            filename = data['url'] if stream else ytdl.prepare_filename(data)
-            return [{'filename': filename, 'data': data}]
+            return [data]
     
     @classmethod
-    async def create_source(cls, data, *, loop=None, volume=0.5):
-        """Create audio source from data"""
+    async def create_source(cls, data, *, loop=None, volume=1.0):
+        """Create audio source from data with optimized audio processing"""
         loop = loop or asyncio.get_event_loop()
         
         try:
@@ -171,11 +204,20 @@ class YTDLSource(discord.PCMVolumeTransformer):
             # Log the URL being played for debugging
             print(f"Creating audio source from: {filename[:100]}...")
             
-            # Create FFmpeg audio source
-            source = discord.FFmpegPCMAudio(
-                filename,
-                **FFMPEG_OPTIONS
-            )
+            # Try with full audio processing first
+            try:
+                source = discord.FFmpegPCMAudio(
+                    filename,
+                    **FFMPEG_OPTIONS
+                )
+                print("✅ Using advanced audio processing (normalization + compression + EQ)")
+            except Exception as e:
+                # Fallback to simple normalization if advanced filters fail
+                print(f"⚠️  Advanced filters failed, using simple normalization: {e}")
+                source = discord.FFmpegPCMAudio(
+                    filename,
+                    **FFMPEG_OPTIONS_SIMPLE
+                )
             
             return cls(source, data=data['data'], volume=volume)
         except Exception as e:
@@ -734,12 +776,13 @@ async def play_command(interaction: discord.Interaction, query: str):
         await interaction.response.send_message("❌ Music feature not available. Install yt-dlp: `pip install yt-dlp`")
         return
     
-    await interaction.response.defer()
-    
     # Check if user is in voice channel
     if not interaction.user.voice:
-        await interaction.followup.send("❌ You need to be in a voice channel to play music!")
+        await interaction.response.send_message("❌ You need to be in a voice channel to play music!")
         return
+    
+    # Send immediate response
+    await interaction.response.send_message("🔍 Searching... Please wait.", ephemeral=False)
     
     voice_channel = interaction.user.voice.channel
     player = get_music_player(interaction.guild.id)
@@ -753,13 +796,13 @@ async def play_command(interaction: discord.Interaction, query: str):
             player.voice_client = await voice_channel.connect()
             print(f"🔊 Connected to voice channel: {voice_channel.name}")
         except Exception as e:
-            await interaction.followup.send(f"❌ Failed to connect to voice channel: {str(e)}")
+            await interaction.edit_original_response(content=f"❌ Failed to connect to voice channel: {str(e)}")
             return
     elif player.voice_client.channel != voice_channel:
         await player.voice_client.move_to(voice_channel)
         print(f"🔄 Moved to voice channel: {voice_channel.name}")
     
-    # Add to queue
+    # Add to queue asynchronously
     try:
         # If not a URL, search YouTube
         if not query.startswith(('http://', 'https://')):
@@ -768,7 +811,7 @@ async def play_command(interaction: discord.Interaction, query: str):
         added_songs = await player.add_to_queue(query)
         
         if not added_songs:
-            await interaction.followup.send("❌ Failed to add song to queue. Please try again.")
+            await interaction.edit_original_response(content="❌ Failed to add song to queue. The video might be unavailable or restricted.")
             return
         
         # Create embed
@@ -789,17 +832,19 @@ async def play_command(interaction: discord.Interaction, query: str):
                 color=discord.Color.green()
             )
         
-        await interaction.followup.send(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
         
         # Start playing if not already playing
         if not player.is_playing and not player.is_paused:
             await player.play_next()
             
+    except asyncio.TimeoutError:
+        await interaction.edit_original_response(content="❌ Request timed out. YouTube might be slow. Please try again.")
     except Exception as e:
         print(f"❌ Play command error: {e}")
         import traceback
         traceback.print_exc()
-        await interaction.followup.send(f"❌ Error: {str(e)}")
+        await interaction.edit_original_response(content=f"❌ Error: Could not fetch video. Try a different song.")
 
 @bot.tree.command(name="pause", description="Pause the current song")
 async def pause_command(interaction: discord.Interaction):
@@ -915,7 +960,7 @@ async def nowplaying_command(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="volume", description="Set the playback volume (0-100)")
+@bot.tree.command(name="volume", description="Set the playback volume (0-100) - Note: Audio is pre-normalized")
 @app_commands.describe(level="Volume level (0-100)")
 async def volume_command(interaction: discord.Interaction, level: int):
     """Set volume"""
@@ -926,7 +971,7 @@ async def volume_command(interaction: discord.Interaction, level: int):
     player = get_music_player(interaction.guild.id)
     player.set_volume(level / 100)
     
-    await interaction.response.send_message(f"🔊 Volume set to {level}%")
+    await interaction.response.send_message(f"🔊 Volume set to {level}% (Audio is normalized for consistency)")
 
 @bot.tree.command(name="loop", description="Toggle loop mode for current song")
 async def loop_command(interaction: discord.Interaction):
