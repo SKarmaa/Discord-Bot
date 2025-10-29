@@ -1,0 +1,36 @@
+📜 Privacy Policy
+Effective Date: 2025-07-02
+
+Thank you for using our Discord bot ("Bot"). We respect your privacy and are committed to protecting it. This Privacy Policy explains how the Bot collects, uses, and stores information when you use it on your Discord server.
+
+1. Information We Collect
+We only collect minimal data necessary to operate our services, such as:
+
+User IDs and Server IDs: Used to track settings and preferences.
+
+Message content (in limited cases): Only when required for bot functionality (e.g., moderation triggers or keyword actions). These are not stored permanently.
+
+Server configuration: Data such as channel IDs, roles, and command preferences.
+
+We do not collect or store any personal information such as email addresses, real names, or private messages.
+
+2. How We Use Your Data
+We use the collected data to:
+
+Provide and improve Bot functionality.
+
+Store server-specific configurations and preferences.
+
+Ensure moderation and utility features work as intended.
+
+3. Data Sharing
+We do not sell or share your data with third parties. Data is only used internally for Bot functionality.
+
+4. Data Retention
+Data is retained only as long as necessary to provide Bot services. Upon request, data related to your server can be deleted.
+
+5. User Rights
+You may request deletion of your server data or configuration at any time by contacting us at: shopnilshrestha5@gmail.com
+
+6. Changes to this Policy
+We may update this Privacy Policy as needed. Continued use of the Bot indicates acceptance of the updated policy.
