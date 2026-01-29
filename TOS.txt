@@ -1,0 +1,34 @@
+📄 Terms of Service
+Effective Date: 2025-07-02
+
+By adding and using the Bot in your Discord server, you agree to the following terms:
+
+1. Usage
+The Bot is provided to help manage your server and offer fun interactions. You may not:
+
+Use the Bot for illegal or abusive purposes.
+
+Reverse engineer or attempt to gain unauthorized access to Bot functions.
+
+Spam or overload the Bot's commands.
+
+2. Uptime & Reliability
+We strive to keep the Bot online and functional, but we provide no guarantee of uptime or availability. Outages may occur due to maintenance or technical issues.
+
+3. Limitation of Liability
+We are not liable for:
+
+Any loss or damage arising from the use (or inability to use) the Bot.
+
+Actions taken by moderators or users using the Bot's features.
+
+4. Termination
+We reserve the right to restrict access to the Bot for any user or server that violates these terms, without prior notice.
+
+5. Changes to Terms
+We may update these terms at any time. Continued use of the Bot means you accept the updated Terms of Service.
+
+Contact Us:
+If you have any questions or concerns, please contact us via Discord: shrestha_8
+
+
