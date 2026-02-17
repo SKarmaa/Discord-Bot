@@ -471,7 +471,7 @@ async def query_gemini_api(prompt: str) -> str:
     if not GEMINI_API_KEY:
         return "❌ Gemini API key not configured. Please add GEMINI_API_KEY to your .env file."
 
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     
     headers = {
         'Content-Type': 'application/json'
