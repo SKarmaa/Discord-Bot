@@ -249,6 +249,7 @@
     "general_reactions": ["😂", "👍", "🤔", "😎", "🔥", "✨"],
     "write_command_user_id": 235006682583793664,
     "write_command_channel_id": 762775973816696863,
-    "general_channel_id": 762775973816696863
+    "general_channel_id": 762775973816696863,
+    "confession_channel_id": 782141021211328522
   }
 }
