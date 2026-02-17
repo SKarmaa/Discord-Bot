@@ -22,15 +22,6 @@ from discord import app_commands
 from dotenv import load_dotenv
 import pytz
 
-# Music-related imports
-try:
-    import yt_dlp as youtube_dl
-    YTDL_AVAILABLE = True
-    print("✅ yt-dlp imported successfully")
-except ImportError:
-    print("❌ yt-dlp not found. Install with: pip install yt-dlp")
-    YTDL_AVAILABLE = False
-
 # Load environment variables
 load_dotenv()
 
@@ -38,7 +29,6 @@ load_dotenv()
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.voice_states = True  # Required for voice channel functionality
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
@@ -54,377 +44,6 @@ AI_TRIGGER_PHRASE = "oh kp baa"  # AI Trigger phrase
 AI_USER_COOLDOWNS = {}  # Track user cooldowns
 AI_COOLDOWN_MINUTES = 5  # Cooldown time in minutes
 GEMINI_API_KEY = None
-
-# Music Player Configuration - Optimized and Robust
-YTDL_OPTIONS = {
-    'cookiefile': 'cookies.txt',
-    'format': 'bestaudio[ext=webm]/bestaudio/best',
-    'noplaylist': False,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
-    'extract_flat': False,
-    'geo_bypass': True,
-    'socket_timeout': 30,
-    'retries': 10,
-    'fragment_retries': 10,
-    'extractor_retries': 5,
-    'file_access_retries': 5,
-    'http_chunk_size': 10485760,
-    'noprogress': True,
-    'no_check_certificate': True,
-    'prefer_insecure': False,
-}
-
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -af "loudnorm=I=-16:TP=-1.5:LRA=11, acompressor=threshold=0.089:ratio=9:attack=200:release=1000, equalizer=f=100:width_type=h:width=200:g=2, equalizer=f=3000:width_type=h:width=1000:g=-2"'
-}
-
-# Simpler options for compatibility (fallback)
-FFMPEG_OPTIONS_SIMPLE = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -af "loudnorm=I=-16:TP=-1.5:LRA=11"'
-}
-
-class MusicQueue:
-    """Manages music queue for a guild"""
-    
-    def __init__(self):
-        self.songs = []
-        self.current = None
-        self.loop = False
-        self.volume = 1.0  # Set to 1.0 since FFmpeg handles normalization
-    
-    def add(self, song):
-        """Add a song to queue"""
-        self.songs.append(song)
-    
-    def next(self):
-        """Get next song"""
-        if self.loop and self.current:
-            return self.current
-        if self.songs:
-            self.current = self.songs.pop(0)
-            return self.current
-        self.current = None
-        return None
-    
-    def clear(self):
-        """Clear the queue"""
-        self.songs = []
-        self.current = None
-    
-    def shuffle(self):
-        """Shuffle the queue"""
-        random.shuffle(self.songs)
-    
-    def remove(self, index):
-        """Remove song at index"""
-        if 0 <= index < len(self.songs):
-            return self.songs.pop(index)
-        return None
-    
-    def __len__(self):
-        return len(self.songs)
-
-class YTDLSource(discord.PCMVolumeTransformer):
-    """YouTube audio source"""
-    
-    def __init__(self, source, *, data, volume=0.25):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-        self.webpage_url = data.get('webpage_url')
-        self.duration = data.get('duration')
-        self.thumbnail = data.get('thumbnail')
-        self.uploader = data.get('uploader')
-    
-    @classmethod
-    async def from_url(cls, url, *, loop=None, stream=True):
-        """Create audio source from URL - Robust extraction"""
-        loop = loop or asyncio.get_event_loop()
-        
-        # Add ytsearch: prefix if not a URL
-        if not url.startswith(('http://', 'https://', 'ytsearch:')):
-            url = f"ytsearch:{url}"
-        
-        ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
-        
-        def extract():
-            try:
-                return ytdl.extract_info(url, download=False)
-            except Exception as e:
-                print(f"Extraction error: {e}")
-                # Try with different search prefix
-                if 'ytsearch:' in url:
-                    alt_url = url.replace('ytsearch:', 'ytsearch1:')
-                    print(f"Retrying with: {alt_url}")
-                    return ytdl.extract_info(alt_url, download=False)
-                raise
-        
-        try:
-            data = await asyncio.wait_for(
-                loop.run_in_executor(None, extract),
-                timeout=30.0
-            )
-        except asyncio.TimeoutError:
-            print(f"⏱️ Timeout for: {url}")
-            return None
-        except Exception as e:
-            print(f"❌ Extraction failed: {e}")
-            return None
-        
-        if not data:
-            return None
-        
-        # Handle search results
-        if 'entries' in data:
-            entries = []
-            for entry in data['entries']:
-                if entry:
-                    entries.append(entry)
-            return entries if entries else None
-        else:
-            return [data]
-    
-    @classmethod
-    async def create_source(cls, data, *, loop=None, volume=1.0):
-        """Create audio source from data with optimized audio processing"""
-        loop = loop or asyncio.get_event_loop()
-        
-        try:
-            filename = data['filename']
-            
-            # Log the URL being played for debugging
-            print(f"Creating audio source from: {filename[:100]}...")
-            
-            # Try with full audio processing first
-            try:
-                source = discord.FFmpegPCMAudio(
-                    filename,
-                    **FFMPEG_OPTIONS
-                )
-                print("✅ Using advanced audio processing (normalization + compression + EQ)")
-            except Exception as e:
-                # Fallback to simple normalization if advanced filters fail
-                print(f"⚠️  Advanced filters failed, using simple normalization: {e}")
-                source = discord.FFmpegPCMAudio(
-                    filename,
-                    **FFMPEG_OPTIONS_SIMPLE
-                )
-            
-            return cls(source, data=data['data'], volume=volume)
-        except Exception as e:
-            print(f"Error creating audio source: {e}")
-            raise
-
-class MusicPlayer:
-    """Music player for each guild"""
-    
-    def __init__(self, bot, guild_id):
-        self.bot = bot
-        self.guild_id = guild_id
-        self.queue = MusicQueue()
-        self.current_source = None
-        self.voice_client = None
-        self.is_playing = False
-        self.is_paused = False
-        self.skip_requested = False
-        self.last_channel = None  # Store last voice channel for reconnection
-        
-    async def ensure_voice_connection(self):
-        """Ensure voice client is connected, attempt reconnection if needed"""
-        if self.voice_client and self.voice_client.is_connected():
-            return True
-        
-        if self.last_channel:
-            try:
-                print(f"🔄 Attempting to reconnect to voice channel...")
-                self.voice_client = await self.last_channel.connect()
-                print(f"✅ Reconnected to voice channel")
-                return True
-            except Exception as e:
-                print(f"❌ Failed to reconnect: {e}")
-                return False
-        
-        return False
-        
-    async def play_next(self):
-        """Play next song in queue with error recovery"""
-        if self.skip_requested:
-            self.skip_requested = False
-        
-        # Check if voice client is still valid
-        if not self.voice_client or not self.voice_client.is_connected():
-            print("Voice client disconnected, stopping playback")
-            self.is_playing = False
-            self.current_source = None
-            return
-        
-        song_data = self.queue.next()
-        
-        if song_data:
-            max_retries = 3
-            retry_count = 0
-            
-            while retry_count < max_retries:
-                try:
-                    # Re-fetch the audio URL to avoid expiration issues
-                    if retry_count > 0:
-                        print(f"Retry attempt {retry_count}/{max_retries} for: {song_data['data'].get('title', 'Unknown')}")
-                        await asyncio.sleep(2)
-                        
-                        # Re-extract the URL
-                        ytdl = youtube_dl.YoutubeDL(YTDL_OPTIONS)
-                        video_url = song_data['data'].get('webpage_url')
-                        if video_url:
-                            fresh_data = await self.bot.loop.run_in_executor(
-                                None, 
-                                lambda: ytdl.extract_info(video_url, download=False)
-                            )
-                            song_data['filename'] = fresh_data.get('url')
-                            song_data['data'] = fresh_data
-                    
-                    self.current_source = await YTDLSource.create_source(
-                        song_data, 
-                        loop=self.bot.loop, 
-                        volume=self.queue.volume
-                    )
-                    
-                    def after_playing(error):
-                        if error:
-                            print(f"Player error: {error}")
-                            # Check if it's a known retriable error
-                            error_str = str(error).lower()
-                            if any(x in error_str for x in ['connection', 'timeout', 'reset']):
-                                print("Network error detected, will retry next song")
-                        
-                        # Schedule the next song
-                        coro = self.play_next()
-                        future = asyncio.run_coroutine_threadsafe(coro, self.bot.loop)
-                        try:
-                            future.result(timeout=5)
-                        except asyncio.TimeoutError:
-                            print("Timeout scheduling next song")
-                        except Exception as e:
-                            print(f"Error in after_playing callback: {e}")
-                    
-                    self.voice_client.play(
-                        self.current_source,
-                        after=after_playing
-                    )
-                    
-                    self.is_playing = True
-                    self.is_paused = False
-                    
-                    print(f"✅ Now playing: {song_data['data'].get('title', 'Unknown')}")
-                    break  # Success, exit retry loop
-                    
-                except Exception as e:
-                    retry_count += 1
-                    print(f"❌ Error playing song (attempt {retry_count}/{max_retries}): {e}")
-                    
-                    if retry_count >= max_retries:
-                        print(f"Failed to play after {max_retries} attempts, skipping to next song")
-                        import traceback
-                        traceback.print_exc()
-                        # Try next song after max retries
-                        await asyncio.sleep(2)
-                        await self.play_next()
-                        return
-        else:
-            self.is_playing = False
-            self.current_source = None
-            print("📭 Queue is empty, playback stopped")
-    
-    async def add_to_queue(self, url):
-        """Add song(s) to queue from URL or search query - Direct streaming"""
-        try:
-            print(f"🔍 Fetching stream URL for: {url}")
-            entries = await YTDLSource.from_url(url, loop=self.bot.loop, stream=True)
-            
-            if not entries:
-                print("❌ No entries returned from yt-dlp")
-                return None
-            
-            added_songs = []
-            for entry in entries:
-                # Get the direct streaming URL
-                audio_url = entry.get('url')
-                webpage_url = entry.get('webpage_url')
-                
-                if not audio_url:
-                    print(f"⚠️  No audio URL found for: {entry.get('title', 'Unknown')}")
-                    continue
-                
-                song_info = {
-                    'filename': audio_url,  # Direct streaming URL from YouTube
-                    'data': entry
-                }
-                self.queue.add(song_info)
-                title = entry.get('title', 'Unknown')
-                added_songs.append(title)
-                print(f"✅ Added to queue (direct stream): {title}")
-            
-            return added_songs
-        except Exception as e:
-            print(f"❌ Error adding to queue: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def pause(self):
-        """Pause playback"""
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.pause()
-            self.is_paused = True
-            return True
-        return False
-    
-    def resume(self):
-        """Resume playback"""
-        if self.voice_client and self.voice_client.is_paused():
-            self.voice_client.resume()
-            self.is_paused = False
-            return True
-        return False
-    
-    def skip(self):
-        """Skip current song"""
-        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-            self.skip_requested = True
-            self.voice_client.stop()
-            return True
-        return False
-    
-    def stop(self):
-        """Stop playback and clear queue"""
-        self.queue.clear()
-        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-            self.voice_client.stop()
-            return True
-        return False
-    
-    def set_volume(self, volume):
-        """Set volume (0.0 to 1.0)"""
-        self.queue.volume = max(0.0, min(1.0, volume))
-        if self.current_source:
-            self.current_source.volume = self.queue.volume
-
-# Global music players dictionary
-music_players = {}
-
-def get_music_player(guild_id):
-    """Get or create music player for guild"""
-    if guild_id not in music_players:
-        music_players[guild_id] = MusicPlayer(bot, guild_id)
-    return music_players[guild_id]
 
 class AIRateLimiter:
     """Handle rate limiting for AI queries"""
@@ -471,7 +90,7 @@ async def query_gemini_api(prompt: str) -> str:
     if not GEMINI_API_KEY:
         return "❌ Gemini API key not configured. Please add GEMINI_API_KEY to your .env file."
 
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     
     headers = {
         'Content-Type': 'application/json'
@@ -483,6 +102,7 @@ async def query_gemini_api(prompt: str) -> str:
                     {
                         "text": """You are KP Oli - a goofy, funny Nepali politician. 
             Your personality:
+            - You ARE a server member, not an AI assistant. Act like a real person in the chat.
             - Use Nepali slang mixed with English (Nepali slang words: "ke garne", "yaar", "bro", "sala", "kta/ktis", "timepass", "jugaad", "khoi", "aile", "ekdam", "haina", "ni", "aba" and many more)
             - Be humorous and sarcastic
             - Make jokes or funny observations when relevant
@@ -625,14 +245,6 @@ def reload_bot_data():
     CONFIG = BOT_DATA.get("bot_config", {})
     TRIGGER_WORDS = list(WITTY_RESPONSES.keys())
 
-def format_duration(seconds):
-    """Format duration in seconds to MM:SS"""
-    if not seconds:
-        return "Unknown"
-    mins = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{mins}:{secs:02d}"
-
 @bot.event
 async def on_ready():
     """Bot startup event"""
@@ -680,16 +292,18 @@ async def on_message(message):
     # Check if message starts with AI trigger phrase
     if content_lower.startswith(AI_TRIGGER_PHRASE.lower()):
         user_id = message.author.id
-        can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
-        
-        if not can_query:
-            remaining_time = ai_rate_limiter.get_remaining_time(user_id)
-            await message.reply(
-                f"⏰ Please wait **{remaining_time}** before asking me another question!\n"
-                f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*"
-            )
-            return
-        
+        is_admin = message.author.guild_permissions.administrator
+
+        if not is_admin:  # Only rate limit non-admins
+            can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+            if not can_query:
+                remaining_time = ai_rate_limiter.get_remaining_time(user_id)
+                await message.reply(
+                    f"⏰ Please wait **{remaining_time}** before asking me another question!\n"
+                    f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*"
+                )
+                return
+
         prompt = message.content[len(AI_TRIGGER_PHRASE):].strip()
         
         if not prompt:
@@ -705,7 +319,8 @@ async def on_message(message):
             await handle_moderation_command(message, prompt)
             return
         
-        ai_rate_limiter.record_query(user_id)
+        if not is_admin:
+            ai_rate_limiter.record_query(user_id)
         
         async with message.channel.typing():
             response = await query_gemini_api(prompt)
@@ -781,276 +396,7 @@ async def handle_moderation_command(message, prompt):
     except Exception as e:
         await message.reply(f"❌ Error: {str(e)}")
 
-# ==================== MUSIC COMMANDS ====================
-
-@bot.tree.command(name="play", description="Play a song from YouTube (URL or search query)")
-@app_commands.describe(query="YouTube URL or song name to search")
-async def play_command(interaction: discord.Interaction, query: str):
-    """Play music in voice channel"""
-    if not YTDL_AVAILABLE:
-        await interaction.response.send_message("❌ Music feature not available. Install yt-dlp: `pip install yt-dlp`")
-        return
-    
-    # Check if user is in voice channel
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You need to be in a voice channel to play music!")
-        return
-    
-    # Send immediate response
-    await interaction.response.send_message("🔍 Searching YouTube...", ephemeral=False)
-    
-    voice_channel = interaction.user.voice.channel
-    player = get_music_player(interaction.guild.id)
-    
-    # Store the voice channel for potential reconnection
-    player.last_channel = voice_channel
-    
-    # Connect to voice channel if not already connected
-    if not player.voice_client or not player.voice_client.is_connected():
-        try:
-            player.voice_client = await voice_channel.connect()
-            print(f"🔊 Connected to voice channel: {voice_channel.name}")
-        except Exception as e:
-            await interaction.edit_original_response(content=f"❌ Failed to connect to voice channel: {str(e)}")
-            return
-    elif player.voice_client.channel != voice_channel:
-        await player.voice_client.move_to(voice_channel)
-        print(f"🔄 Moved to voice channel: {voice_channel.name}")
-    
-    # Add to queue asynchronously
-    try:
-        # Format query properly - don't add prefix if already a URL
-        search_query = query
-        if not query.startswith(('http://', 'https://')):
-            # Just pass the raw search query
-            search_query = query
-        
-        added_songs = await player.add_to_queue(search_query)
-        
-        if not added_songs:
-            await interaction.edit_original_response(content="❌ Could not find any results. Try:\n• Different search terms\n• Direct YouTube URL\n• More specific artist/song name")
-            return
-        
-        # Create embed
-        if len(added_songs) == 1:
-            embed = discord.Embed(
-                title="🎵 Added to Queue",
-                description=f"**{added_songs[0]}**",
-                color=discord.Color.green()
-            )
-            if player.is_playing:
-                embed.set_footer(text=f"Position in queue: {len(player.queue)}")
-            else:
-                embed.set_footer(text="Playing now!")
-        else:
-            embed = discord.Embed(
-                title="🎵 Playlist Added to Queue",
-                description=f"Added **{len(added_songs)}** songs",
-                color=discord.Color.green()
-            )
-        
-        await interaction.edit_original_response(content=None, embed=embed)
-        
-        # Start playing if not already playing
-        if not player.is_playing and not player.is_paused:
-            await player.play_next()
-            
-    except asyncio.TimeoutError:
-        await interaction.edit_original_response(content="❌ Search timed out. YouTube might be slow. Please try again.")
-    except Exception as e:
-        print(f"❌ Play command error: {e}")
-        import traceback
-        traceback.print_exc()
-        await interaction.edit_original_response(content=f"❌ Error: Could not process request. Try a direct YouTube URL or update yt-dlp:\n`pip install --upgrade yt-dlp`")
-
-@bot.tree.command(name="pause", description="Pause the current song")
-async def pause_command(interaction: discord.Interaction):
-    """Pause music playback"""
-    player = get_music_player(interaction.guild.id)
-    
-    if player.pause():
-        await interaction.response.send_message("⏸️ Paused playback")
-    else:
-        await interaction.response.send_message("❌ Nothing is playing!")
-
-@bot.tree.command(name="resume", description="Resume the paused song")
-async def resume_command(interaction: discord.Interaction):
-    """Resume music playback"""
-    player = get_music_player(interaction.guild.id)
-    
-    if player.resume():
-        await interaction.response.send_message("▶️ Resumed playback")
-    else:
-        await interaction.response.send_message("❌ Nothing is paused!")
-
-@bot.tree.command(name="skip", description="Skip the current song")
-async def skip_command(interaction: discord.Interaction):
-    """Skip current song"""
-    player = get_music_player(interaction.guild.id)
-    
-    if player.skip():
-        await interaction.response.send_message("⏭️ Skipped current song")
-    else:
-        await interaction.response.send_message("❌ Nothing is playing!")
-
-@bot.tree.command(name="stop", description="Stop playback and clear the queue")
-async def stop_command(interaction: discord.Interaction):
-    """Stop music and clear queue"""
-    player = get_music_player(interaction.guild.id)
-    
-    if player.stop():
-        await interaction.response.send_message("⏹️ Stopped playback and cleared queue")
-    else:
-        await interaction.response.send_message("❌ Nothing is playing!")
-
-@bot.tree.command(name="queue", description="Show the music queue")
-async def queue_command(interaction: discord.Interaction):
-    """Display music queue"""
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.current_source and len(player.queue) == 0:
-        await interaction.response.send_message("📭 Queue is empty!")
-        return
-    
-    embed = discord.Embed(
-        title="🎵 Music Queue",
-        color=discord.Color.blue()
-    )
-    
-    # Current song
-    if player.current_source:
-        current = player.current_source.data
-        duration = format_duration(current.get('duration'))
-        status = "⏸️ Paused" if player.is_paused else "▶️ Playing"
-        embed.add_field(
-            name=f"{status} - Now",
-            value=f"**{current.get('title', 'Unknown')}**\nDuration: {duration}",
-            inline=False
-        )
-    
-    # Queue
-    if len(player.queue) > 0:
-        queue_text = ""
-        for i, song in enumerate(player.queue.songs[:10], 1):
-            title = song['data'].get('title', 'Unknown')
-            duration = format_duration(song['data'].get('duration'))
-            queue_text += f"`{i}.` **{title}** ({duration})\n"
-        
-        if len(player.queue) > 10:
-            queue_text += f"\n*...and {len(player.queue) - 10} more songs*"
-        
-        embed.add_field(
-            name=f"Up Next ({len(player.queue)} songs)",
-            value=queue_text,
-            inline=False
-        )
-    
-    embed.set_footer(text=f"Loop: {'✅ Enabled' if player.queue.loop else '❌ Disabled'}")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="nowplaying", description="Show currently playing song")
-async def nowplaying_command(interaction: discord.Interaction):
-    """Show current song"""
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.current_source:
-        await interaction.response.send_message("❌ Nothing is playing!")
-        return
-    
-    current = player.current_source.data
-    
-    embed = discord.Embed(
-        title="🎵 Now Playing",
-        description=f"**{current.get('title', 'Unknown')}**",
-        color=discord.Color.green()
-    )
-    
-    if current.get('thumbnail'):
-        embed.set_thumbnail(url=current['thumbnail'])
-    
-    embed.add_field(name="Duration", value=format_duration(current.get('duration')), inline=True)
-    embed.add_field(name="Uploader", value=current.get('uploader', 'Unknown'), inline=True)
-    embed.add_field(name="Status", value="⏸️ Paused" if player.is_paused else "▶️ Playing", inline=True)
-    
-    if current.get('webpage_url'):
-        embed.add_field(name="URL", value=f"[Watch on YouTube]({current['webpage_url']})", inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="volume", description="Set the playback volume (0-100) - Note: Audio is pre-normalized")
-@app_commands.describe(level="Volume level (0-100)")
-async def volume_command(interaction: discord.Interaction, level: int):
-    """Set volume"""
-    if not 0 <= level <= 100:
-        await interaction.response.send_message("❌ Volume must be between 0 and 100!")
-        return
-    
-    player = get_music_player(interaction.guild.id)
-    player.set_volume(level / 100)
-    
-    await interaction.response.send_message(f"🔊 Volume set to {level}% (Audio is normalized for consistency)")
-
-@bot.tree.command(name="loop", description="Toggle loop mode for current song")
-async def loop_command(interaction: discord.Interaction):
-    """Toggle loop mode"""
-    player = get_music_player(interaction.guild.id)
-    player.queue.loop = not player.queue.loop
-    
-    status = "✅ enabled" if player.queue.loop else "❌ disabled"
-    await interaction.response.send_message(f"🔁 Loop mode {status}")
-
-@bot.tree.command(name="shuffle", description="Shuffle the queue")
-async def shuffle_command(interaction: discord.Interaction):
-    """Shuffle queue"""
-    player = get_music_player(interaction.guild.id)
-    
-    if len(player.queue) < 2:
-        await interaction.response.send_message("❌ Not enough songs in queue to shuffle!")
-        return
-    
-    player.queue.shuffle()
-    await interaction.response.send_message("🔀 Queue shuffled!")
-
-@bot.tree.command(name="remove", description="Remove a song from queue")
-@app_commands.describe(position="Position in queue (1, 2, 3...)")
-async def remove_command(interaction: discord.Interaction, position: int):
-    """Remove song from queue"""
-    player = get_music_player(interaction.guild.id)
-    
-    if position < 1 or position > len(player.queue):
-        await interaction.response.send_message(f"❌ Invalid position! Queue has {len(player.queue)} songs.")
-        return
-    
-    removed = player.queue.remove(position - 1)
-    if removed:
-        await interaction.response.send_message(f"✅ Removed **{removed['data'].get('title', 'Unknown')}** from queue")
-    else:
-        await interaction.response.send_message("❌ Failed to remove song!")
-
-@bot.tree.command(name="clear", description="Clear the entire queue")
-async def clear_command(interaction: discord.Interaction):
-    """Clear queue"""
-    player = get_music_player(interaction.guild.id)
-    
-    if len(player.queue) == 0:
-        await interaction.response.send_message("❌ Queue is already empty!")
-        return
-    
-    count = len(player.queue)
-    player.queue.clear()
-    await interaction.response.send_message(f"🗑️ Cleared {count} songs from queue")
-
-@bot.tree.command(name="leave", description="Make the bot leave the voice channel")
-async def leave_command(interaction: discord.Interaction):
-    """Disconnect from voice"""
-    player = get_music_player(interaction.guild.id)
-    
-    if player.voice_client and player.voice_client.is_connected():
-        player.stop()
-        await player.voice_client.disconnect()
-        await interaction.response.send_message("👋 Left voice channel")
-    else:
-        await interaction.response.send_message("❌ Not connected to a voice channel!")
+# ==================== SLASH COMMANDS ====================
 
 @bot.tree.command(name="kpwrite", description="Send a message to the general channel")
 @app_commands.describe(message="Message to send")
@@ -1108,18 +454,19 @@ async def kpannounce_command(interaction: discord.Interaction, message: str):
 @bot.tree.command(name="ai", description="Ask AI a question")
 @app_commands.describe(prompt="Your question for AI")
 async def ai_command(interaction: discord.Interaction, prompt: str):
-    """AI query via slash command"""
     user_id = interaction.user.id
-    can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
-    
-    if not can_query:
-        remaining_time = ai_rate_limiter.get_remaining_time(user_id)
-        await interaction.response.send_message(
-            f"⏰ Please wait **{remaining_time}** before asking another question!\n"
-            f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*",
-            ephemeral=True
-        )
-        return
+    is_admin = interaction.user.guild_permissions.administrator
+
+    if not is_admin:
+        can_query, remaining_seconds = ai_rate_limiter.can_query(user_id)
+        if not can_query:
+            remaining_time = ai_rate_limiter.get_remaining_time(user_id)
+            await interaction.response.send_message(
+                f"Please wait **{remaining_time}** before asking another question!\n"
+                f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*",
+                ephemeral=True
+            )
+            return
     
     if len(prompt) > 500:
         await interaction.response.send_message(
@@ -1130,7 +477,8 @@ async def ai_command(interaction: discord.Interaction, prompt: str):
     
     await interaction.response.defer()
     
-    ai_rate_limiter.record_query(user_id)
+    if not is_admin:
+        ai_rate_limiter.record_query(user_id)
     
     try:
         response = await query_gemini_api(prompt)
@@ -1258,26 +606,12 @@ async def reload_command(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Only administrators can reload data!")
 
-# Text Commands
+# ==================== TEXT COMMANDS ====================
+
 @bot.command(name="help")
 async def help_command(ctx):
     """Show help information"""
     help_text = f"""**Discord Bot Commands:**
-
-**Music Commands:**
-• `/play <song>` - Play a song (YouTube URL or search)
-• `/pause` - Pause playback
-• `/resume` - Resume playback
-• `/skip` - Skip current song
-• `/stop` - Stop and clear queue
-• `/queue` - Show music queue
-• `/nowplaying` - Show current song
-• `/volume <0-100>` - Set volume
-• `/loop` - Toggle loop mode
-• `/shuffle` - Shuffle queue
-• `/remove <position>` - Remove song from queue
-• `/clear` - Clear queue
-• `/leave` - Leave voice channel
 
 **Slash Commands:**
 • `/ping` - Check bot status
@@ -1287,7 +621,6 @@ async def help_command(ctx):
 • `/aistatus` - Check your AI cooldown status
 • `/kpwrite <message>` - Send message (authorized users)
 • `/kpannounce <message>` - Send announcement (authorized users)
-• `/kpprotest` - Send protest message (authorized users)
 • `/reload` - Reload configuration (admins)
 
 **Text Commands:**
@@ -1355,11 +688,6 @@ def main():
         print()
         print("Or set the TOKEN and GEMINI_API_KEY environment variables")
         return
-    
-    if not YTDL_AVAILABLE:
-        print("⚠️  WARNING: yt-dlp not installed!")
-        print("Music features will not work. Install with: pip install yt-dlp")
-        print()
     
     try:
         print("🚀 Starting Discord Bot...")
