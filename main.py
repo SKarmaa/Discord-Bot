@@ -3,6 +3,7 @@ import json
 import random
 import re
 import asyncio
+import html
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
@@ -526,6 +527,20 @@ async def eightball_command(interaction: discord.Interaction, question: str):
     embed.set_footer(text=f"Asked by {interaction.user.display_name}")
     await interaction.response.send_message(embed=embed)
 
+# ==================== COIN FLIP ====================
+
+@bot.tree.command(name="coinflip", description="Flip a coin!")
+async def coinflip_command(interaction: discord.Interaction):
+    result = random.choice(["Heads", "Tails"])
+    emoji = "🪙" if result == "Heads" else "🟤"
+    embed = discord.Embed(
+        title="🪙 Coin Flip",
+        description=f"## {emoji} {result}!",
+        color=discord.Color.gold() if result == "Heads" else discord.Color.dark_grey()
+    )
+    embed.set_footer(text=f"Flipped by {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
 # ==================== URBAN DICTIONARY ====================
 
 @bot.tree.command(name="define", description="Look up a word or slang on Urban Dictionary")
@@ -947,16 +962,32 @@ async def reload_command(interaction: discord.Interaction):
 async def help_command(ctx):
     help_text = f"""**Discord Bot Commands:**
 
-**Fun & Info:**
-• `/poll <question> <opt1> <opt2> [opt3] [opt4]` — Create a reaction poll
+**Fun & Games:**
+• `/trivia` — Random trivia question with buttons
+• `/wyr` — Would You Rather question
+• `/truth` — Random truth question
+• `/dare` — Random dare
+• `/rps` — Rock Paper Scissors vs the bot
 • `/8ball <question>` — Ask the magic 8-ball
-• `/confess` — Submit an anonymous confession
+• `/coinflip` — Flip a coin
+• `/poll <question> <opt1> <opt2> [opt3] [opt4]` — Create a reaction poll
+
+**Info:**
+• `/userinfo [@user]` — View a user's info
+• `/roleinfo <@role>` — View a role's info
+• `/avatar [@user]` — View someone's full-size avatar
 • `/define <word>` — Urban Dictionary lookup
 • `/weather <city>` — Current weather for any city
-• `/calendar [days]` — Upcoming Nepali festivals (default: 30 days)
-• `/avatar [@user]` — View someone's full-size avatar
+• `/calendar [days]` — Upcoming Nepali festivals
+
+**Utility:**
+• `/remind <time> <message>` — Set a reminder (e.g. 30m, 2h, 1d)
+• `/afk [reason]` — Set yourself as AFK
+• `/confess` — Submit an anonymous confession
 
 **Moderation:**
+• `/lock [reason]` — Lock the current channel
+• `/unlock [reason]` — Unlock the current channel
 • `/slowmode <seconds>` — Set channel slowmode (0 to disable)
 • `/purge <amount>` — Bulk delete messages (1–100)
 
@@ -1013,6 +1044,511 @@ async def reload_data_command(ctx):
             await ctx.send(f"❌ Reload failed: {str(e)}")
     else:
         await ctx.send("❌ Only administrators can reload data!")
+
+# ==================== TRIVIA ====================
+
+TRIVIA_CACHE = []  # Cache fetched questions
+
+async def fetch_trivia_question() -> dict | None:
+    """Fetch a trivia question from Open Trivia DB (free, no key needed)"""
+    url = "https://opentdb.com/api.php?amount=1&type=multiple"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status != 200:
+                    return None
+                data = await response.json()
+                if data.get("response_code") == 0 and data.get("results"):
+                    return data["results"][0]
+    except Exception as e:
+        print(f"Trivia fetch error: {e}")
+    return None
+
+class TriviaView(discord.ui.View):
+    def __init__(self, correct: str, options: list[str], question: str):
+        super().__init__(timeout=30)
+        self.correct = correct
+        self.answered = set()
+
+        emojis = ["🇦", "🇧", "🇨", "🇩"]
+        for i, option in enumerate(options):
+            btn = discord.ui.Button(
+                label=f"{emojis[i]} {option[:60]}",
+                custom_id=f"trivia_{i}",
+                style=discord.ButtonStyle.secondary
+            )
+            btn.callback = self.make_callback(option)
+            self.add_item(btn)
+
+    def make_callback(self, option: str):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id in self.answered:
+                await interaction.response.send_message("You already answered!", ephemeral=True)
+                return
+            self.answered.add(interaction.user.id)
+            if option == self.correct:
+                await interaction.response.send_message(f"✅ Correct! The answer was **{self.correct}**", ephemeral=True)
+            else:
+                await interaction.response.send_message(f"❌ Wrong! The correct answer was **{self.correct}**", ephemeral=True)
+        return callback
+
+@bot.tree.command(name="trivia", description="Get a random trivia question")
+async def trivia_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    question_data = await fetch_trivia_question()
+    if not question_data:
+        await interaction.followup.send("❌ Could not fetch a trivia question. Try again in a moment.")
+        return
+
+    question = html.unescape(question_data["question"])
+    correct = html.unescape(question_data["correct_answer"])
+    incorrects = [html.unescape(a) for a in question_data["incorrect_answers"]]
+    options = incorrects + [correct]
+    random.shuffle(options)
+
+    category = question_data.get("category", "General")
+    difficulty = question_data.get("difficulty", "medium").title()
+    diff_colors = {"Easy": discord.Color.green(), "Medium": discord.Color.orange(), "Hard": discord.Color.red()}
+
+    embed = discord.Embed(
+        title="🧠 Trivia Time!",
+        description=f"**{question}**",
+        color=diff_colors.get(difficulty, discord.Color.blurple())
+    )
+    embed.add_field(name="Category", value=category, inline=True)
+    embed.add_field(name="Difficulty", value=difficulty, inline=True)
+    embed.set_footer(text="You have 30 seconds to answer!")
+
+    view = TriviaView(correct, options, question)
+    await interaction.followup.send(embed=embed, view=view)
+
+# ==================== WOULD YOU RATHER ====================
+
+WYR_QUESTIONS = [
+    ("be able to fly", "be able to breathe underwater"),
+    ("always speak your mind", "never speak again"),
+    ("live without music", "live without TV/movies"),
+    ("be the funniest person in the room", "be the smartest person in the room"),
+    ("have unlimited money but no friends", "have amazing friends but always be broke"),
+    ("know when you'll die", "know how you'll die"),
+    ("be famous but hated", "be unknown but loved"),
+    ("only eat dal bhat every day", "never eat dal bhat again"),
+    ("lose all your memories", "never make new ones"),
+    ("be able to talk to animals", "speak all human languages"),
+    ("always be 10 minutes late", "always be 2 hours early"),
+    ("have free WiFi everywhere", "have free food everywhere"),
+    ("never use social media again", "never watch Netflix again"),
+    ("fight 100 duck-sized horses", "fight 1 horse-sized duck"),
+    ("have 3 arms", "have 3 legs"),
+    ("wake up every day in a new country", "never leave your home country"),
+    ("be the best player on a losing team", "be the worst player on a winning team"),
+    ("give up chai/coffee forever", "give up your favourite food forever"),
+    ("have to sing everything you say", "have to dance everywhere you go"),
+    ("have no internet for a month", "have no friends for a month"),
+]
+
+@bot.tree.command(name="wyr", description="Get a Would You Rather question")
+async def wyr_command(interaction: discord.Interaction):
+    option_a, option_b = random.choice(WYR_QUESTIONS)
+    embed = discord.Embed(
+        title="🤔 Would You Rather...",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="🅰️ Option A", value=option_a.capitalize(), inline=False)
+    embed.add_field(name="🅱️ Option B", value=option_b.capitalize(), inline=False)
+    embed.set_footer(text="React with 🅰️ or 🅱️ to vote!")
+    await interaction.response.send_message(embed=embed)
+    msg = await interaction.original_response()
+    await msg.add_reaction("🅰️")
+    await msg.add_reaction("🅱️")
+
+# ==================== TRUTH OR DARE ====================
+
+TRUTHS = [
+    "What's the most embarrassing thing you've done in public?",
+    "What's a secret you've never told anyone in this server?",
+    "Who in this server do you have a crush on?",
+    "What's the biggest lie you've ever told?",
+    "What's the most childish thing you still do?",
+    "What's your most embarrassing childhood memory?",
+    "Have you ever cheated on a test?",
+    "What's the worst gift you've ever received?",
+    "What's something you pretend to like but actually hate?",
+    "What's the pettiest thing you've ever done?",
+    "Have you ever blamed someone else for something you did?",
+    "What's your biggest irrational fear?",
+    "What's the most awkward date you've been on?",
+    "What's a bad habit you have that no one knows about?",
+    "What's the most embarrassing text you've sent to the wrong person?",
+]
+
+DARES = [
+    "Type 'I love KP Oli' in the server chat.",
+    "Change your nickname to 'Sala Boka' for 10 minutes.",
+    "Send a voice message singing the first 10 seconds of a Nepali song.",
+    "DM a random server member a compliment right now.",
+    "Type everything in CAPS for the next 5 minutes.",
+    "Send your most recent photo from your camera roll (no deleting!).",
+    "Write a poem about dal bhat in 2 minutes.",
+    "Let the person to your right pick your profile picture for 1 hour.",
+    "Send a GIF that describes your mood right now.",
+    "Use only emojis for your next 5 messages.",
+    "Tag two people and say something genuinely nice about each.",
+    "React to the last 10 messages in this channel.",
+    "Send a voice note saying 'I am the best person in this server'.",
+    "Speak only in questions for the next 3 minutes.",
+    "Write a haiku about the last person who messaged in this channel.",
+]
+
+@bot.tree.command(name="truth", description="Get a random truth question")
+async def truth_command(interaction: discord.Interaction):
+    question = random.choice(TRUTHS)
+    embed = discord.Embed(
+        title="🫣 Truth!",
+        description=f"**{question}**",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text=f"Dare for {interaction.user.display_name} — no lying!")
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="dare", description="Get a random dare")
+async def dare_command(interaction: discord.Interaction):
+    dare = random.choice(DARES)
+    embed = discord.Embed(
+        title="😈 Dare!",
+        description=f"**{dare}**",
+        color=discord.Color.red()
+    )
+    embed.set_footer(text=f"Dare for {interaction.user.display_name} — no chickening out!")
+    await interaction.response.send_message(embed=embed)
+
+# ==================== ROCK PAPER SCISSORS ====================
+
+RPS_CHOICES = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+RPS_WINS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
+
+class RPSView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=30)
+
+    async def play(self, interaction: discord.Interaction, player_choice: str):
+        bot_choice = random.choice(list(RPS_CHOICES.keys()))
+        player_emoji = RPS_CHOICES[player_choice]
+        bot_emoji = RPS_CHOICES[bot_choice]
+
+        if player_choice == bot_choice:
+            result = "🤝 It's a tie!"
+            color = discord.Color.yellow()
+        elif RPS_WINS[player_choice] == bot_choice:
+            result = "🎉 You win!"
+            color = discord.Color.green()
+        else:
+            result = "😂 Bot wins!"
+            color = discord.Color.red()
+
+        embed = discord.Embed(title="🪨📄✂️ Rock Paper Scissors", color=color)
+        embed.add_field(name=f"You ({interaction.user.display_name})", value=f"{player_emoji} {player_choice.title()}", inline=True)
+        embed.add_field(name="KP Bot", value=f"{bot_emoji} {bot_choice.title()}", inline=True)
+        embed.add_field(name="Result", value=f"**{result}**", inline=False)
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="🪨 Rock", style=discord.ButtonStyle.secondary)
+    async def rock(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.play(interaction, "rock")
+
+    @discord.ui.button(label="📄 Paper", style=discord.ButtonStyle.secondary)
+    async def paper(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.play(interaction, "paper")
+
+    @discord.ui.button(label="✂️ Scissors", style=discord.ButtonStyle.secondary)
+    async def scissors(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.play(interaction, "scissors")
+
+@bot.tree.command(name="rps", description="Play Rock Paper Scissors against the bot")
+async def rps_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🪨📄✂️ Rock Paper Scissors",
+        description="Choose your weapon!",
+        color=discord.Color.blurple()
+    )
+    await interaction.response.send_message(embed=embed, view=RPSView())
+
+# ==================== USER INFO ====================
+
+@bot.tree.command(name="userinfo", description="View info about a user")
+@app_commands.describe(user="The user to look up (leave empty for yourself)")
+async def userinfo_command(interaction: discord.Interaction, user: discord.Member = None):
+    target = user or interaction.user
+    now = discord.utils.utcnow()
+
+    account_age = (now - target.created_at).days
+    join_age = (now - target.joined_at).days if target.joined_at else 0
+
+    roles = [r.mention for r in reversed(target.roles) if r.name != "@everyone"]
+    roles_str = " ".join(roles[:10]) if roles else "None"
+    if len(target.roles) - 1 > 10:
+        roles_str += f" *+{len(target.roles) - 11} more*"
+
+    status_emojis = {
+        discord.Status.online: "🟢 Online",
+        discord.Status.idle: "🟡 Idle",
+        discord.Status.dnd: "🔴 Do Not Disturb",
+        discord.Status.offline: "⚫ Offline",
+    }
+    status = status_emojis.get(target.status, "⚫ Offline")
+
+    badges = []
+    if target.bot:
+        badges.append("🤖 Bot")
+    if target.guild_permissions.administrator:
+        badges.append("👑 Admin")
+    if target.premium_since:
+        badges.append("💎 Server Booster")
+
+    embed = discord.Embed(
+        title=f"👤 {target.display_name}",
+        color=target.color if target.color.value != 0 else discord.Color.blurple()
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Username", value=str(target), inline=True)
+    embed.add_field(name="ID", value=target.id, inline=True)
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="Account Created", value=f"{target.created_at.strftime('%b %d, %Y')}\n*{account_age} days ago*", inline=True)
+    embed.add_field(name="Joined Server", value=f"{target.joined_at.strftime('%b %d, %Y') if target.joined_at else 'Unknown'}\n*{join_age} days ago*", inline=True)
+    embed.add_field(name="Nickname", value=target.nick or "None", inline=True)
+    embed.add_field(name=f"Roles ({len(target.roles) - 1})", value=roles_str or "None", inline=False)
+    if badges:
+        embed.add_field(name="Badges", value=" · ".join(badges), inline=False)
+    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+# ==================== ROLE INFO ====================
+
+@bot.tree.command(name="roleinfo", description="View info about a role")
+@app_commands.describe(role="The role to look up")
+async def roleinfo_command(interaction: discord.Interaction, role: discord.Role):
+    now = discord.utils.utcnow()
+    age = (now - role.created_at).days
+    member_count = len(role.members)
+
+    # Key permissions to highlight
+    key_perms = []
+    perms = role.permissions
+    if perms.administrator:       key_perms.append("Administrator")
+    if perms.manage_guild:        key_perms.append("Manage Server")
+    if perms.manage_channels:     key_perms.append("Manage Channels")
+    if perms.manage_roles:        key_perms.append("Manage Roles")
+    if perms.manage_messages:     key_perms.append("Manage Messages")
+    if perms.kick_members:        key_perms.append("Kick Members")
+    if perms.ban_members:         key_perms.append("Ban Members")
+    if perms.mention_everyone:    key_perms.append("Mention Everyone")
+    if perms.moderate_members:    key_perms.append("Timeout Members")
+
+    color = role.color if role.color.value != 0 else discord.Color.light_grey()
+    hex_color = str(role.color) if role.color.value != 0 else "#000000"
+
+    embed = discord.Embed(
+        title=f"🏷️ Role: {role.name}",
+        color=color
+    )
+    embed.add_field(name="ID", value=role.id, inline=True)
+    embed.add_field(name="Color", value=hex_color, inline=True)
+    embed.add_field(name="Members", value=member_count, inline=True)
+    embed.add_field(name="Created", value=f"{role.created_at.strftime('%b %d, %Y')}\n*{age} days ago*", inline=True)
+    embed.add_field(name="Mentionable", value="✅ Yes" if role.mentionable else "❌ No", inline=True)
+    embed.add_field(name="Hoisted", value="✅ Yes" if role.hoist else "❌ No", inline=True)
+    embed.add_field(
+        name="Key Permissions",
+        value=", ".join(key_perms) if key_perms else "No special permissions",
+        inline=False
+    )
+    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed)
+
+# ==================== REMINDER ====================
+
+active_reminders = {}  # user_id -> list of reminder tasks
+
+@bot.tree.command(name="remind", description="Set a reminder (e.g. 30m, 2h, 1d)")
+@app_commands.describe(
+    time="Time until reminder (e.g. 10m, 2h, 1d)",
+    reminder="What to remind you about"
+)
+async def remind_command(interaction: discord.Interaction, time: str, reminder: str):
+    # Parse time string
+    time = time.lower().strip()
+    seconds = 0
+    pattern = re.findall(r'(\d+)([smhd])', time)
+    if not pattern:
+        await interaction.response.send_message(
+            "❌ Invalid time format! Use: `30s`, `10m`, `2h`, `1d` or combinations like `1h30m`",
+            ephemeral=True
+        )
+        return
+
+    unit_map = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+    for value, unit in pattern:
+        seconds += int(value) * unit_map[unit]
+
+    if seconds < 10:
+        await interaction.response.send_message("❌ Minimum reminder time is 10 seconds.", ephemeral=True)
+        return
+    if seconds > 7 * 86400:
+        await interaction.response.send_message("❌ Maximum reminder time is 7 days.", ephemeral=True)
+        return
+
+    fire_time = discord.utils.utcnow() + timedelta(seconds=seconds)
+
+    # Format display time
+    parts = []
+    remaining = seconds
+    for unit, name in [(86400, "day"), (3600, "hour"), (60, "minute"), (1, "second")]:
+        if remaining >= unit:
+            val = remaining // unit
+            remaining %= unit
+            parts.append(f"{val} {name}{'s' if val != 1 else ''}")
+    time_str = ", ".join(parts)
+
+    await interaction.response.send_message(
+        f"⏰ Got it! I'll remind you about **{reminder}** in **{time_str}**.",
+        ephemeral=False
+    )
+
+    async def send_reminder():
+        await asyncio.sleep(seconds)
+        try:
+            embed = discord.Embed(
+                title="⏰ Reminder!",
+                description=reminder,
+                color=discord.Color.yellow()
+            )
+            embed.set_footer(text=f"Set {time_str} ago")
+            await interaction.user.send(embed=embed)
+        except discord.Forbidden:
+            # DMs closed — send in channel instead
+            try:
+                await interaction.channel.send(
+                    f"⏰ {interaction.user.mention} — reminder: **{reminder}**"
+                )
+            except Exception:
+                pass
+
+    task = asyncio.create_task(send_reminder())
+    user_reminders = active_reminders.setdefault(interaction.user.id, [])
+    user_reminders.append(task)
+
+# ==================== AFK SYSTEM ====================
+
+afk_users = {}  # user_id -> {"reason": str, "time": datetime}
+
+@bot.tree.command(name="afk", description="Set yourself as AFK")
+@app_commands.describe(reason="Reason for being AFK (optional)")
+async def afk_command(interaction: discord.Interaction, reason: str = "AFK"):
+    afk_users[interaction.user.id] = {
+        "reason": reason,
+        "time": discord.utils.utcnow()
+    }
+    await interaction.response.send_message(
+        f"💤 **{interaction.user.display_name}** is now AFK: *{reason}*"
+    )
+    # Try to add [AFK] to nickname
+    try:
+        current_nick = interaction.user.display_name
+        if not current_nick.startswith("[AFK]"):
+            await interaction.user.edit(nick=f"[AFK] {current_nick}"[:32])
+    except discord.Forbidden:
+        pass
+
+# AFK check is handled in on_message — we add it there via a hook
+_original_on_message = bot.on_message if hasattr(bot, '_afk_patched') else None
+
+@bot.listen('on_message')
+async def afk_listener(message):
+    if message.author.bot:
+        return
+
+    # Remove AFK if the AFK user sends a message
+    if message.author.id in afk_users:
+        afk_data = afk_users.pop(message.author.id)
+        elapsed = discord.utils.utcnow() - afk_data["time"]
+        minutes = int(elapsed.total_seconds() // 60)
+        time_str = f"{minutes} minute{'s' if minutes != 1 else ''}" if minutes else "less than a minute"
+        await message.channel.send(
+            f"👋 Welcome back, {message.author.mention}! You were AFK for **{time_str}**.",
+            delete_after=10
+        )
+        # Remove [AFK] from nickname
+        try:
+            if message.author.display_name.startswith("[AFK]"):
+                new_nick = message.author.display_name[6:].strip() or None
+                await message.author.edit(nick=new_nick)
+        except discord.Forbidden:
+            pass
+
+    # Notify if someone pings an AFK user
+    for mentioned in message.mentions:
+        if mentioned.id in afk_users and mentioned.id != message.author.id:
+            afk_data = afk_users[mentioned.id]
+            elapsed = discord.utils.utcnow() - afk_data["time"]
+            minutes = int(elapsed.total_seconds() // 60)
+            time_str = f"{minutes} minute{'s' if minutes != 1 else ''}" if minutes else "just now"
+            await message.channel.send(
+                f"💤 **{mentioned.display_name}** is AFK: *{afk_data['reason']}* — went AFK {time_str} ago.",
+                delete_after=10
+            )
+
+# ==================== LOCK / UNLOCK ====================
+
+@bot.tree.command(name="lock", description="Lock the current channel so members can't send messages")
+@app_commands.describe(reason="Reason for locking (optional)")
+async def lock_command(interaction: discord.Interaction, reason: str = "No reason provided"):
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("❌ You need **Manage Channels** permission!", ephemeral=True)
+        return
+
+    channel = interaction.channel
+    everyone = interaction.guild.default_role
+
+    try:
+        await channel.set_permissions(everyone, send_messages=False)
+        embed = discord.Embed(
+            title="🔒 Channel Locked",
+            description=f"**{channel.name}** has been locked.\n**Reason:** {reason}",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text=f"Locked by {interaction.user.display_name}")
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to manage this channel!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="unlock", description="Unlock the current channel")
+@app_commands.describe(reason="Reason for unlocking (optional)")
+async def unlock_command(interaction: discord.Interaction, reason: str = "No reason provided"):
+    if not interaction.user.guild_permissions.manage_channels:
+        await interaction.response.send_message("❌ You need **Manage Channels** permission!", ephemeral=True)
+        return
+
+    channel = interaction.channel
+    everyone = interaction.guild.default_role
+
+    try:
+        await channel.set_permissions(everyone, send_messages=None)  # Reset to default
+        embed = discord.Embed(
+            title="🔓 Channel Unlocked",
+            description=f"**{channel.name}** has been unlocked.\n**Reason:** {reason}",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text=f"Unlocked by {interaction.user.display_name}")
+        await interaction.response.send_message(embed=embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to manage this channel!", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
 # ==================== MAIN ====================
 
