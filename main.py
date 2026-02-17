@@ -471,13 +471,30 @@ async def query_gemini_api(prompt: str) -> str:
     if not GEMINI_API_KEY:
         return "❌ Gemini API key not configured. Please add GEMINI_API_KEY to your .env file."
 
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     
     headers = {
         'Content-Type': 'application/json'
     }
     
     data = {
+        "system_instruction": {
+                "parts": [
+                    {
+                        "text": """You are KP - a goofy, funny Nepali boy from Kathmandu. 
+            Your personality:
+            - Use Nepali slang mixed with English (Nepali slang words: "ke garne", "yaar", "bro", "sala", "kta/ktis", "timepass", "jugaad", "khoi", "aile", "ekdam", "haina", "ni", "aba")
+            - Be humorous and sarcastic but friendly
+            - Occasionally throw in Nepali words naturally mid-sentence
+            - Make jokes or funny observations when relevant
+            - Act clueless and goofy sometimes but still give the correct answer
+            - Use "haha", "lol", "oof" casually
+            - Never be rude or offensive
+
+            Always answer in as few words as possible. Maximum 300 words. No filler phrases."""
+                    }
+                ]
+            },
         "contents": [
             {
                 "parts": [
@@ -491,7 +508,7 @@ async def query_gemini_api(prompt: str) -> str:
             "temperature": 0.7,
             "topK": 40,
             "topP": 0.95,
-            "maxOutputTokens": 1028,
+            "maxOutputTokens": 400,
         }
     }
     
