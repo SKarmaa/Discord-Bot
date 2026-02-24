@@ -438,7 +438,7 @@ async def on_message(message):
             if not can_query:
                 remaining_time = ai_rate_limiter.get_remaining_time(user_id)
                 await message.reply(
-                    f"Please wait **{remaining_time}** before asking me another question!\n"
+                    f"⏰ Please wait **{remaining_time}** before asking me another question!\n"
                     f"*Rate limit: 1 query every {AI_COOLDOWN_MINUTES} minutes per user*"
                 )
                 return
@@ -447,11 +447,11 @@ async def on_message(message):
             await message.reply(f"Please ask me a question!\nExample: `{AI_TRIGGER_PHRASE} what is python?`")
             return
         if len(prompt) > 500:
-            await message.reply("Dherai lamo prashna sodheu keep it short. Maximum 500 characters.")
+            await message.reply("❌ Your question is too long! Please keep it under 500 characters.")
             return
         # Prompt safety check
         if not is_prompt_safe(prompt):
-            await message.reply("Ayo bro, त्यस्तो prompt chai hudaina! Afno kaam gara na yaar 😂")
+            await message.reply("❌ Ayo bro, त्यस्तो prompt chai hudaina! Afno kaam gara na yaar 😂")
             return
         if any(word in prompt.lower() for word in ['kick', 'ban', 'mute', 'unmute']):
             await handle_moderation_command(message, prompt)
@@ -801,26 +801,26 @@ async def calendar_command(interaction: discord.Interaction, days: int = 30):
 async def slowmode_command(interaction: discord.Interaction, seconds: int):
     if not interaction.user.guild_permissions.manage_channels:
         await interaction.response.send_message(
-            "You need **Manage Channels** permission to use this!", ephemeral=True
+            "❌ You need **Manage Channels** permission to use this!", ephemeral=True
         )
         return
     if seconds < 0 or seconds > 21600:
         await interaction.response.send_message(
-            "Slowmode must be between 0 and 21600 seconds (6 hours).", ephemeral=True
+            "❌ Slowmode must be between 0 and 21600 seconds (6 hours).", ephemeral=True
         )
         return
     try:
         await interaction.channel.edit(slowmode_delay=seconds)
         if seconds == 0:
-            await interaction.response.send_message("Slowmode **disabled** for this channel.")
+            await interaction.response.send_message("✅ Slowmode **disabled** for this channel.")
         else:
             minutes, secs = divmod(seconds, 60)
             time_str = f"{minutes}m {secs}s" if minutes else f"{secs}s"
-            await interaction.response.send_message(f"Slowmode set to **{time_str}** for this channel.")
+            await interaction.response.send_message(f"✅ Slowmode set to **{time_str}** for this channel.")
     except discord.Forbidden:
-        await interaction.response.send_message("I don't have permission to edit this channel!", ephemeral=True)
+        await interaction.response.send_message("❌ I don't have permission to edit this channel!", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
 # ==================== PURGE ====================
 
@@ -829,11 +829,11 @@ async def slowmode_command(interaction: discord.Interaction, seconds: int):
 async def purge_command(interaction: discord.Interaction, amount: int):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message(
-            "You need **Manage Messages** permission to use this!", ephemeral=True
+            "❌ You need **Manage Messages** permission to use this!", ephemeral=True
         )
         return
     if amount < 1 or amount > 100:
-        await interaction.response.send_message("Please choose between 1 and 100 messages.", ephemeral=True)
+        await interaction.response.send_message("❌ Please choose between 1 and 100 messages.", ephemeral=True)
         return
 
     await interaction.response.defer(ephemeral=True)
@@ -841,9 +841,9 @@ async def purge_command(interaction: discord.Interaction, amount: int):
         deleted = await interaction.channel.purge(limit=amount)
         await interaction.followup.send(f"🗑️ Deleted **{len(deleted)}** message(s).", ephemeral=True)
     except discord.Forbidden:
-        await interaction.followup.send("I don't have permission to delete messages here!", ephemeral=True)
+        await interaction.followup.send("❌ I don't have permission to delete messages here!", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Error: {str(e)}", ephemeral=True)
 
 # ==================== AVATAR ====================
 
@@ -887,25 +887,25 @@ async def avatar_command(interaction: discord.Interaction, user: discord.Member 
 async def kpwrite_command(interaction: discord.Interaction, message: str):
     authorized_user_id = CONFIG.get("write_command_user_id", 0)
     if interaction.user.id != authorized_user_id:
-        await interaction.response.send_message("You are not authorized to use this command!", ephemeral=True)
+        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
         return
     channel_id = CONFIG.get("write_command_channel_id", 0)
     if not channel_id:
-        await interaction.response.send_message("Write channel not configured!", ephemeral=True)
+        await interaction.response.send_message("❌ Write channel not configured!", ephemeral=True)
         return
     channel = bot.get_channel(channel_id)
     if channel:
         await channel.send(message)
         await interaction.response.send_message("✅ Message sent!", ephemeral=True)
     else:
-        await interaction.response.send_message("Channel not found!", ephemeral=True)
+        await interaction.response.send_message("❌ Channel not found!", ephemeral=True)
 
 @bot.tree.command(name="kpannounce", description="Send an announcement message")
 @app_commands.describe(message="Announcement message")
 async def kpannounce_command(interaction: discord.Interaction, message: str):
     authorized_user_id = CONFIG.get("write_command_user_id", 0)
     if interaction.user.id != authorized_user_id:
-        await interaction.response.send_message("You are not authorized to use this command!", ephemeral=True)
+        await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
         return
     general_channel_id = CONFIG.get("general_channel_id", 0)
     if not general_channel_id:
@@ -936,13 +936,13 @@ async def ai_command(interaction: discord.Interaction, prompt: str):
             return
     if len(prompt) > 500:
         await interaction.response.send_message(
-            "Your question is too long! Please keep it under 500 characters.", ephemeral=True
+            "❌ Your question is too long! Please keep it under 500 characters.", ephemeral=True
         )
         return
     # Prompt safety check
     if not is_prompt_safe(prompt):
         await interaction.response.send_message(
-            "Ayo bro, त्यस्तो prompt chai hudaina! Afno kaam gara na yaar",
+            "❌ Ayo bro, त्यस्तो prompt chai hudaina! Afno kaam gara na yaar 😂",
             ephemeral=True
         )
         return
@@ -1628,6 +1628,285 @@ async def unlock_command(interaction: discord.Interaction, reason: str = "No rea
         await interaction.response.send_message("❌ I don't have permission to manage this channel!", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+
+# ==================== GIVEAWAY ====================
+
+# Active giveaways: message_id -> giveaway data dict
+active_giveaways: dict[int, dict] = {}
+
+def parse_duration(time_str: str) -> int | None:
+    """Parse a duration string like 10m, 2h, 1d into seconds. Returns None if invalid."""
+    time_str = time_str.lower().strip()
+    pattern = re.findall(r'(\d+)([smhd])', time_str)
+    if not pattern:
+        return None
+    unit_map = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+    seconds = sum(int(v) * unit_map[u] for v, u in pattern)
+    return seconds if seconds > 0 else None
+
+def format_duration(seconds: int) -> str:
+    parts = []
+    for unit, name in [(86400, "day"), (3600, "hour"), (60, "minute"), (1, "second")]:
+        if seconds >= unit:
+            val = seconds // unit
+            seconds %= unit
+            parts.append(f"{val} {name}{'s' if val != 1 else ''}")
+    return ", ".join(parts) if parts else "0 seconds"
+
+def build_giveaway_embed(prize: str, host: discord.Member, ends_at: datetime,
+                          winners_count: int, ended: bool = False,
+                          winners: list[discord.Member] = None) -> discord.Embed:
+    if ended:
+        color = discord.Color.dark_grey()
+        title = "🎉 Giveaway Ended!"
+        if winners:
+            winner_mentions = ", ".join(w.mention for w in winners)
+            desc = (
+                f"**Prize:** {prize}\n"
+                f"**Winner{'s' if len(winners) > 1 else ''}:** {winner_mentions}\n"
+                f"**Hosted by:** {host.mention}"
+            )
+        else:
+            desc = (
+                f"**Prize:** {prize}\n"
+                f"**Winner:** No valid participants 😔\n"
+                f"**Hosted by:** {host.mention}"
+            )
+    else:
+        color = discord.Color.gold()
+        title = "🎉 GIVEAWAY 🎉"
+        timestamp_unix = int(ends_at.timestamp())
+        desc = (
+            f"**Prize:** {prize}\n"
+            f"**Winners:** {winners_count}\n"
+            f"**Ends:** <t:{timestamp_unix}:R> (<t:{timestamp_unix}:f>)\n"
+            f"**Hosted by:** {host.mention}\n\n"
+            f"React with 🎉 to enter!"
+        )
+
+    embed = discord.Embed(title=title, description=desc, color=color)
+    embed.set_footer(text=f"{'Ended' if ended else 'Ends'} at")
+    embed.timestamp = ends_at
+    return embed
+
+async def conclude_giveaway(message_id: int, forced: bool = False):
+    """Pick winners and update the giveaway message."""
+    giveaway = active_giveaways.get(message_id)
+    if not giveaway:
+        return
+
+    channel: discord.TextChannel = giveaway["channel"]
+    host: discord.Member = giveaway["host"]
+    prize: str = giveaway["prize"]
+    winners_count: int = giveaway["winners_count"]
+    ends_at: datetime = giveaway["ends_at"]
+
+    try:
+        msg = await channel.fetch_message(message_id)
+    except Exception:
+        active_giveaways.pop(message_id, None)
+        return
+
+    # Collect all 🎉 reactors, excluding bots and the host
+    reaction_users: list[discord.Member] = []
+    for reaction in msg.reactions:
+        if str(reaction.emoji) == "🎉":
+            async for user in reaction.users():
+                if not user.bot and user.id != host.id:
+                    reaction_users.append(user)
+            break
+
+    winners = random.sample(reaction_users, min(winners_count, len(reaction_users))) if reaction_users else []
+
+    # Edit original message to show ended state
+    ended_embed = build_giveaway_embed(prize, host, ends_at, winners_count, ended=True, winners=winners)
+    await msg.edit(embed=ended_embed)
+
+    # Announce result
+    if winners:
+        winner_mentions = ", ".join(w.mention for w in winners)
+        await channel.send(
+            f"🎊 Congratulations {winner_mentions}! You won **{prize}**!\n"
+            f"*(Giveaway hosted by {host.mention})*"
+        )
+    else:
+        await channel.send(
+            f"😔 The giveaway for **{prize}** ended with no valid participants."
+        )
+
+    active_giveaways.pop(message_id, None)
+
+async def giveaway_timer(message_id: int, seconds: int):
+    """Wait for the duration then auto-conclude."""
+    await asyncio.sleep(seconds)
+    if message_id in active_giveaways:
+        await conclude_giveaway(message_id)
+
+@bot.tree.command(name="giveaway", description="Start a giveaway (Moderators only)")
+@app_commands.describe(
+    prize="What you're giving away",
+    duration="How long to run (e.g. 10m, 2h, 1d). Use 0 to require manual end with /giveaway-end",
+    winners="Number of winners (default: 1)"
+)
+async def giveaway_command(
+    interaction: discord.Interaction,
+    prize: str,
+    duration: str,
+    winners: int = 1
+):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need **Manage Server** permission to start a giveaway!", ephemeral=True
+        )
+        return
+
+    if winners < 1 or winners > 20:
+        await interaction.response.send_message("❌ Winners must be between 1 and 20.", ephemeral=True)
+        return
+
+    # Duration 0 = manual end
+    if duration.strip() == "0":
+        seconds = 0
+        ends_at = datetime.utcnow().replace(tzinfo=pytz.utc) + timedelta(days=365)  # far future placeholder
+    else:
+        seconds = parse_duration(duration)
+        if seconds is None:
+            await interaction.response.send_message(
+                "❌ Invalid duration! Use formats like `30s`, `10m`, `2h`, `1d`.\n"
+                "Use `0` to start a giveaway with no timer (end manually with `/giveaway-end`).",
+                ephemeral=True
+            )
+            return
+        if seconds < 10:
+            await interaction.response.send_message("❌ Minimum giveaway duration is 10 seconds.", ephemeral=True)
+            return
+        if seconds > 7 * 86400:
+            await interaction.response.send_message("❌ Maximum giveaway duration is 7 days.", ephemeral=True)
+            return
+        ends_at = datetime.utcnow().replace(tzinfo=pytz.utc) + timedelta(seconds=seconds)
+
+    embed = build_giveaway_embed(prize, interaction.user, ends_at, winners)
+
+    await interaction.response.send_message("✅ Giveaway started!", ephemeral=True)
+    giveaway_msg = await interaction.channel.send("@everyone", embed=embed)
+    await giveaway_msg.add_reaction("🎉")
+
+    active_giveaways[giveaway_msg.id] = {
+        "channel": interaction.channel,
+        "host": interaction.user,
+        "prize": prize,
+        "winners_count": winners,
+        "ends_at": ends_at,
+        "timer_task": None,
+    }
+
+    if seconds > 0:
+        task = asyncio.create_task(giveaway_timer(giveaway_msg.id, seconds))
+        active_giveaways[giveaway_msg.id]["timer_task"] = task
+
+    if seconds == 0:
+        await interaction.followup.send(
+            f"⏳ Giveaway for **{prize}** is live with no timer.\n"
+            f"Use `/giveaway-end` to pick winners whenever you're ready.",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="giveaway-end", description="Force-end an active giveaway and pick winners now (Moderators only)")
+@app_commands.describe(message_id="The message ID of the giveaway to end")
+async def giveaway_end_command(interaction: discord.Interaction, message_id: str):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need **Manage Server** permission!", ephemeral=True
+        )
+        return
+
+    try:
+        mid = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    if mid not in active_giveaways:
+        await interaction.response.send_message(
+            "❌ No active giveaway found with that message ID.\n"
+            "Make sure you copied the correct message ID from the giveaway post.",
+            ephemeral=True
+        )
+        return
+
+    # Cancel the timer task if running
+    task = active_giveaways[mid].get("timer_task")
+    if task and not task.done():
+        task.cancel()
+
+    await interaction.response.send_message("🎲 Ending giveaway and picking winners...", ephemeral=True)
+    await conclude_giveaway(mid, forced=True)
+
+@bot.tree.command(name="giveaway-reroll", description="Reroll a winner for a recently ended giveaway (Moderators only)")
+@app_commands.describe(message_id="The message ID of the ended giveaway")
+async def giveaway_reroll_command(interaction: discord.Interaction, message_id: str):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ You need **Manage Server** permission!", ephemeral=True
+        )
+        return
+
+    try:
+        mid = int(message_id)
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid message ID.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        msg = await interaction.channel.fetch_message(mid)
+    except Exception:
+        await interaction.followup.send("❌ Could not find that message in this channel.", ephemeral=True)
+        return
+
+    # Collect reactors again
+    reaction_users: list[discord.Member] = []
+    for reaction in msg.reactions:
+        if str(reaction.emoji) == "🎉":
+            async for user in reaction.users():
+                if not user.bot:
+                    reaction_users.append(user)
+            break
+
+    if not reaction_users:
+        await interaction.followup.send("❌ No participants found to reroll from.", ephemeral=True)
+        return
+
+    new_winner = random.choice(reaction_users)
+    await interaction.channel.send(
+        f"🔄 **Reroll!** The new winner is {new_winner.mention}! Congratulations! 🎉"
+    )
+    await interaction.followup.send("✅ Rerolled successfully!", ephemeral=True)
+
+@bot.tree.command(name="giveaway-list", description="Show all currently active giveaways")
+async def giveaway_list_command(interaction: discord.Interaction):
+    if not active_giveaways:
+        await interaction.response.send_message("📭 There are no active giveaways right now.", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="🎉 Active Giveaways", color=discord.Color.gold())
+    for msg_id, data in active_giveaways.items():
+        timestamp_unix = int(data["ends_at"].timestamp())
+        has_timer = data.get("timer_task") is not None
+        time_str = f"<t:{timestamp_unix}:R>" if has_timer else "Manual end"
+        embed.add_field(
+            name=f"🎁 {data['prize']}",
+            value=(
+                f"**Message ID:** `{msg_id}`\n"
+                f"**Channel:** {data['channel'].mention}\n"
+                f"**Host:** {data['host'].mention}\n"
+                f"**Winners:** {data['winners_count']}\n"
+                f"**Ends:** {time_str}"
+            ),
+            inline=False
+        )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ==================== MAIN ====================
 
