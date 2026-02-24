@@ -1907,6 +1907,50 @@ async def giveaway_list_command(interaction: discord.Interaction):
             inline=False
         )
     await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+# ==================== MASS MOVE ====================
+
+@bot.tree.command(name="massmove", description="Move all users from one voice channel to another (Moderators only)")
+@app_commands.describe(
+    from_channel="The voice channel to move users FROM",
+    to_channel="The voice channel to move users TO"
+)
+async def massmove_command(
+    interaction: discord.Interaction,
+    from_channel: discord.VoiceChannel,
+    to_channel: discord.VoiceChannel
+):
+    if not interaction.user.guild_permissions.move_members:
+        await interaction.response.send_message(
+            "❌ You need **Move Members** permission to use this!", ephemeral=True
+        )
+        return
+
+    members = from_channel.members
+    if not members:
+        await interaction.response.send_message(
+            f"❌ **{from_channel.name}** is empty — nobody to move!", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    success, failed = 0, 0
+    for member in members:
+        try:
+            await member.move_to(to_channel)
+            success += 1
+        except discord.Forbidden:
+            failed += 1
+        except Exception:
+            failed += 1
+
+    parts = [f"✅ Moved **{success}** member{'s' if success != 1 else ''}"]
+    parts.append(f"from **{from_channel.name}** → **{to_channel.name}**")
+    if failed:
+        parts.append(f"\n⚠️ Failed to move **{failed}** member{'s' if failed != 1 else ''} (no permission or already disconnected)")
+
+    await interaction.followup.send(" ".join(parts), ephemeral=False)
 
 # ==================== MAIN ====================
 
