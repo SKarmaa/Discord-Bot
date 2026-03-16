@@ -389,7 +389,7 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,
-            name="Vote for values, not symbols!"
+            name="If words hurt you, this isn’t your place."
         )
     )
     # Restore any giveaways that were active before restart
