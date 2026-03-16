@@ -5,7 +5,7 @@ import re
 import asyncio
 import html
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 import aiohttp
 import time
@@ -32,7 +32,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+bot = commands.Bot(command_prefix='.', intents=intents, help_command=None)
 
 # Global variables for bot data
 BOT_DATA = {}
@@ -44,7 +44,7 @@ TRIGGER_WORDS = []
 # AI Integration variables
 AI_TRIGGER_PHRASE = "oh kp baa"
 AI_USER_COOLDOWNS = {}
-AI_COOLDOWN_MINUTES = 10
+AI_COOLDOWN_MINUTES = 15
 GEMINI_API_KEY = None
 
 TARGET_CHANNEL_ID = 762775973816696863
@@ -421,7 +421,7 @@ async def on_message_delete(message):
         "author_id": message.author.id,
         "author_name": message.author.display_name,
         "author_avatar": message.author.display_avatar.url,
-        "deleted_at": datetime.now(datetime.UTC),
+        "deleted_at": datetime.now(timezone.utc),
         "attachment_url": attachment_url,
     }
 
@@ -966,7 +966,7 @@ async def snipe_command(interaction: discord.Interaction):
         return
 
     # How long ago was it deleted?
-    elapsed = (datetime.now(datetime.UTC) - data["deleted_at"]).total_seconds()
+    elapsed = (datetime.now(timezone.utc) - data["deleted_at"]).total_seconds()
     if elapsed < 60:
         time_ago = f"{int(elapsed)}s ago"
     elif elapsed < 3600:
@@ -1019,6 +1019,651 @@ async def avatar_command(interaction: discord.Interaction, user: discord.Member 
         ))
 
     await interaction.response.send_message(embed=embed, view=view)
+
+# ==================== PREFIX COMMANDS ====================
+
+# ── Helper: resolve a member from mention, ID, or name search ──
+async def _resolve_member(ctx, query: str | None) -> discord.Member | None:
+    if query is None:
+        return ctx.author
+    if ctx.message.mentions:
+        return ctx.message.mentions[0]
+    q = query.strip()
+    if q.isdigit():
+        m = ctx.guild.get_member(int(q))
+        if m:
+            return m
+        await ctx.send("❌ No member found with that ID.")
+        return None
+    ql = q.lower()
+    m = (
+        discord.utils.find(lambda m: m.display_name.lower() == ql, ctx.guild.members)
+        or discord.utils.find(lambda m: m.name.lower() == ql, ctx.guild.members)
+        or discord.utils.find(lambda m: ql in m.display_name.lower(), ctx.guild.members)
+        or discord.utils.find(lambda m: ql in m.name.lower(), ctx.guild.members)
+    )
+    if m is None:
+        await ctx.send(f"❌ Couldn't find a member matching **{q}**.")
+    return m
+
+# ── .av ──
+@bot.command(name="av")
+async def av_prefix(ctx, *, query: str = None):
+    """Show a user's avatar. Usage: .av | .av @user | .av username"""
+    target = await _resolve_member(ctx, query)
+    if target is None:
+        return
+    avatar_url = target.display_avatar.url
+    embed = discord.Embed(
+        title=f"🖼️ {target.display_name}'s Avatar",
+        color=target.color if target.color.value != 0 else discord.Color.blurple()
+    )
+    embed.set_image(url=avatar_url)
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="PNG", url=target.display_avatar.replace(format='png', size=1024).url, style=discord.ButtonStyle.link))
+    view.add_item(discord.ui.Button(label="WEBP", url=target.display_avatar.replace(format='webp', size=1024).url, style=discord.ButtonStyle.link))
+    if target.display_avatar.is_animated():
+        view.add_item(discord.ui.Button(label="GIF", url=target.display_avatar.replace(format='gif', size=1024).url, style=discord.ButtonStyle.link))
+    await ctx.send(embed=embed, view=view)
+
+# ── .snipe ──
+@bot.command(name="snipe")
+async def snipe_prefix(ctx):
+    """Show the last deleted message in this channel."""
+    data = snipe_store.get(ctx.channel.id)
+    if not data:
+        await ctx.send("🔍 Nothing to snipe! No deleted messages cached in this channel.")
+        return
+    elapsed = (datetime.now(timezone.utc) - data["deleted_at"]).total_seconds()
+    if elapsed < 60:
+        time_ago = f"{int(elapsed)}s ago"
+    elif elapsed < 3600:
+        time_ago = f"{int(elapsed // 60)}m ago"
+    else:
+        time_ago = f"{int(elapsed // 3600)}h ago"
+    embed = discord.Embed(
+        description=data["content"] if data["content"] else "*[no text content]*",
+        color=discord.Color.red(),
+        timestamp=data["deleted_at"]
+    )
+    embed.set_author(name=data["author_name"], icon_url=data["author_avatar"])
+    embed.set_footer(text=f"🗑️ Deleted {time_ago} · sniped by {ctx.author.display_name}")
+    if data.get("attachment_url"):
+        embed.set_image(url=data["attachment_url"])
+    await ctx.send(embed=embed)
+
+# ── .weather ──
+@bot.command(name="weather")
+async def weather_prefix(ctx, *, city: str = None):
+    """Get current weather. Usage: .weather <city>"""
+    if not city:
+        await ctx.send("❌ Please provide a city name. Usage: `.weather Kathmandu`")
+        return
+    async with ctx.typing():
+        location = await geocode_city(city)
+        if not location:
+            await ctx.send(f"❌ City **{city}** not found. Check the spelling!")
+            return
+        lat, lon = location["latitude"], location["longitude"]
+        city_name = location.get("name", city)
+        country = location.get("country", "")
+        admin = location.get("admin1", "")
+        weather_url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            f"&current=temperature_2m,apparent_temperature,relative_humidity_2m,"
+            f"wind_speed_10m,weathercode,visibility,precipitation"
+            f"&daily=temperature_2m_max,temperature_2m_min"
+            f"&timezone=auto&forecast_days=1"
+        )
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(weather_url, timeout=10) as response:
+                    if response.status != 200:
+                        await ctx.send("❌ Weather service unavailable. Try again later.")
+                        return
+                    data = await response.json()
+            current = data["current"]
+            daily = data["daily"]
+            wmo = current.get("weathercode", 0)
+            description, emoji = WMO_CODES.get(wmo, ("Unknown", "🌡️"))
+            temp = current.get("temperature_2m", 0)
+            feels_like = current.get("apparent_temperature", 0)
+            humidity = current.get("relative_humidity_2m", 0)
+            wind_speed = current.get("wind_speed_10m", 0)
+            visibility_m = current.get("visibility", 0)
+            visibility_km = visibility_m / 1000 if visibility_m else 0
+            precipitation = current.get("precipitation", 0)
+            temp_max = daily["temperature_2m_max"][0] if daily.get("temperature_2m_max") else temp
+            temp_min = daily["temperature_2m_min"][0] if daily.get("temperature_2m_min") else temp
+            location_str = city_name
+            if admin: location_str += f", {admin}"
+            if country: location_str += f", {country}"
+            embed = discord.Embed(title=f"{emoji} Weather in {location_str}", description=f"**{description}**", color=discord.Color.blue())
+            embed.add_field(name="🌡️ Temperature", value=f"{temp:.1f}°C (feels like {feels_like:.1f}°C)", inline=True)
+            embed.add_field(name="🔼🔽 High / Low", value=f"{temp_max:.1f}°C / {temp_min:.1f}°C", inline=True)
+            embed.add_field(name="💧 Humidity", value=f"{humidity}%", inline=True)
+            embed.add_field(name="💨 Wind Speed", value=f"{wind_speed:.1f} km/h", inline=True)
+            if visibility_km > 0:
+                embed.add_field(name="👁️ Visibility", value=f"{visibility_km:.1f} km", inline=True)
+            if precipitation > 0:
+                embed.add_field(name="🌧️ Precipitation", value=f"{precipitation} mm", inline=True)
+            embed.set_footer(text="Data from Open-Meteo")
+            embed.timestamp = discord.utils.utcnow()
+            await ctx.send(embed=embed)
+        except asyncio.TimeoutError:
+            await ctx.send("❌ Weather request timed out. Please try again.")
+        except Exception as e:
+            await ctx.send(f"❌ Error fetching weather: {str(e)}")
+
+# ── .date ──
+@bot.command(name="date")
+async def date_prefix(ctx):
+    """Get the current date and time in English and Nepali."""
+    try:
+        nepal_tz = pytz.timezone('Asia/Kathmandu')
+        now = datetime.now(nepal_tz)
+        english_date = now.strftime("%A, %B %d, %Y")
+        english_time = now.strftime("%I:%M %p")
+        nepali_date_str = "BS conversion unavailable"
+        if NEPALI_DATETIME_AVAILABLE:
+            try:
+                nepali_dt = nepali_datetime.datetime.from_datetime_datetime(now)
+                nepali_date_str = nepali_dt.strftime("%A, %d %B %Y")
+            except Exception:
+                try:
+                    nepali_d = nepali_datetime.date.from_datetime_date(now.date())
+                    nepali_date_str = nepali_d.strftime("%A, %d %B %Y")
+                except Exception:
+                    nepali_date_str = "BS conversion failed"
+        await ctx.send(
+            f"📅 **Current Date & Time:**\n\n"
+            f"🇬🇧 **English (AD):** {english_date}\n"
+            f"🇳🇵 **Nepali (BS):** {nepali_date_str}\n\n"
+            f"🕐 **Time:** {english_time} (Nepal Time)\n"
+            f"🌍 **Timezone:** Asia/Kathmandu (NPT)"
+        )
+    except Exception as e:
+        await ctx.send(f"❌ Error getting date: {str(e)}")
+
+# ── .define ──
+@bot.command(name="define")
+async def define_prefix(ctx, *, word: str = None):
+    """Look up a word definition. Usage: .define <word>"""
+    if not word:
+        await ctx.send("❌ Please provide a word. Usage: `.define serendipity`")
+        return
+    clean_word = re.sub(r"[^a-zA-Z\s\-]", "", word).strip()
+    if not clean_word:
+        await ctx.send("❌ Please enter a valid word (letters only).")
+        return
+    async with ctx.typing():
+        url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(clean_word)}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 404:
+                        await ctx.send(f"❌ No definition found for **{clean_word}**.")
+                        return
+                    if response.status != 200:
+                        await ctx.send("❌ Dictionary service unavailable. Try again later.")
+                        return
+                    data = await response.json()
+            entry = data[0]
+            word_title = entry.get("word", clean_word)
+            phonetic = entry.get("phonetic", "")
+            embed = discord.Embed(title=f"📖 {word_title}", color=discord.Color.orange())
+            if phonetic:
+                embed.description = f"*{phonetic}*"
+            meanings_shown = 0
+            for meaning in entry.get("meanings", []):
+                if meanings_shown >= 3:
+                    break
+                pos = meaning.get("partOfSpeech", "")
+                defs = meaning.get("definitions", [])
+                if not defs:
+                    continue
+                defn = defs[0].get("definition", "")
+                example = defs[0].get("example", "")
+                synonyms = meaning.get("synonyms", [])[:4]
+                field_value = defn
+                if example: field_value += f"\n*e.g. {example}*"
+                if synonyms: field_value += f"\n**Synonyms:** {', '.join(synonyms)}"
+                if len(field_value) > 900: field_value = field_value[:900] + "..."
+                embed.add_field(name=f"*{pos}*" if pos else "Definition", value=field_value, inline=False)
+                meanings_shown += 1
+            for phonetic_entry in entry.get("phonetics", []):
+                if phonetic_entry.get("audio"):
+                    embed.add_field(name="🔊 Pronunciation", value=f"[Listen]({phonetic_entry['audio']})", inline=False)
+                    break
+            embed.set_footer(text="Free Dictionary API")
+            await ctx.send(embed=embed)
+        except asyncio.TimeoutError:
+            await ctx.send("❌ Request timed out. Please try again.")
+        except Exception as e:
+            await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .lock ──
+@bot.command(name="lock")
+async def lock_prefix(ctx, *, reason: str = None):
+    """Lock the current channel. Usage: .lock [reason]"""
+    if not ctx.author.guild_permissions.manage_channels:
+        await ctx.send("❌ You need **Manage Channels** permission!")
+        return
+    try:
+        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+        desc = f"**{ctx.channel.name}** has been locked."
+        if reason:
+            desc += f"\n**Reason:** {reason}"
+        embed = discord.Embed(title="🔒 Channel Locked", description=desc, color=discord.Color.red())
+        embed.set_footer(text=f"Locked by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to manage this channel!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .unlock ──
+@bot.command(name="unlock")
+async def unlock_prefix(ctx, *, reason: str = None):
+    """Unlock the current channel. Usage: .unlock [reason]"""
+    if not ctx.author.guild_permissions.manage_channels:
+        await ctx.send("❌ You need **Manage Channels** permission!")
+        return
+    try:
+        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
+        desc = f"**{ctx.channel.name}** has been unlocked."
+        if reason:
+            desc += f"\n**Reason:** {reason}"
+        embed = discord.Embed(title="🔓 Channel Unlocked", description=desc, color=discord.Color.green())
+        embed.set_footer(text=f"Unlocked by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to manage this channel!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .mute helpers ──
+def _parse_mute_duration(token: str):
+    match = re.fullmatch(r'(\d+)(s|m|h|hr|d)', token.lower())
+    if not match:
+        return None
+    value, unit = int(match.group(1)), match.group(2)
+    return value * {'s': 1, 'm': 60, 'h': 3600, 'hr': 3600, 'd': 86400}[unit]
+
+def _format_mute_duration(seconds: int) -> str:
+    parts = []
+    for unit, name in [(86400, "day"), (3600, "hour"), (60, "minute"), (1, "second")]:
+        if seconds >= unit:
+            val = seconds // unit
+            seconds %= unit
+            parts.append(f"{val} {name}{'s' if val != 1 else ''}")
+    return ", ".join(parts) if parts else "0 seconds"
+
+# ── .mute ──
+@bot.command(name="mute")
+async def mute_prefix(ctx, *, query: str = None):
+    """Timeout a user. Usage: .mute @user [duration] [reason]
+    Examples: .mute @user | .mute @user 10m | .mute @user 2h spamming"""
+    if not ctx.author.guild_permissions.moderate_members:
+        await ctx.send("❌ You need **Timeout Members** permission!")
+        return
+    if not query:
+        await ctx.send("❌ Usage: `.mute @user [duration] [reason]`\nExamples: `.mute @user` · `.mute @user 10m` · `.mute @user 2h spamming`")
+        return
+
+    tokens = query.split()
+    if ctx.message.mentions:
+        target = ctx.message.mentions[0]
+        remaining_tokens = [t for t in tokens if not re.fullmatch(r'<@!?\d+>', t)]
+    else:
+        ql = tokens[0].lower()
+        target = (
+            discord.utils.find(lambda m: m.display_name.lower() == ql, ctx.guild.members)
+            or discord.utils.find(lambda m: m.name.lower() == ql, ctx.guild.members)
+            or discord.utils.find(lambda m: ql in m.display_name.lower(), ctx.guild.members)
+        )
+        if target is None:
+            await ctx.send(f"❌ Couldn't find a member matching **{tokens[0]}**.")
+            return
+        remaining_tokens = tokens[1:]
+
+    duration_seconds = None  # default: permanent (28 days — Discord max)
+    duration_str = "permanently"
+    reason = None
+
+    if remaining_tokens:
+        parsed = _parse_mute_duration(remaining_tokens[0])
+        if parsed is not None:
+            duration_seconds = parsed
+            duration_str = _format_mute_duration(duration_seconds)
+            reason_tokens = remaining_tokens[1:]
+        else:
+            reason_tokens = remaining_tokens
+        reason = " ".join(reason_tokens) if reason_tokens else None
+
+    if duration_seconds is not None and duration_seconds < 1:
+        await ctx.send("❌ Duration must be at least 1 second.")
+        return
+    if duration_seconds is not None and duration_seconds > 28 * 86400:
+        await ctx.send("❌ Discord's maximum timeout is 28 days.")
+        return
+    if target.top_role >= ctx.author.top_role and not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ You can't mute someone with an equal or higher role!")
+        return
+    try:
+        timeout_until = discord.utils.utcnow() + timedelta(seconds=duration_seconds if duration_seconds else 28 * 86400)
+        await target.timeout(timeout_until, reason=reason)
+        desc = f"**{target.display_name}** has been muted **{duration_str}**."
+        if reason:
+            desc += f"\n**Reason:** {reason}"
+        embed = discord.Embed(title="🔇 User Muted", description=desc, color=discord.Color.orange())
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_footer(text=f"Muted by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to timeout that user!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .unmute ──
+@bot.command(name="unmute")
+async def unmute_prefix(ctx, *, query: str = None):
+    """Remove timeout from a user. Usage: .unmute @user"""
+    if not ctx.author.guild_permissions.moderate_members:
+        await ctx.send("❌ You need **Timeout Members** permission!")
+        return
+    if not query:
+        await ctx.send("❌ Usage: `.unmute @user`")
+        return
+    target = await _resolve_member(ctx, query)
+    if target is None:
+        return
+    try:
+        await target.timeout(None)
+        embed = discord.Embed(
+            title="🔊 User Unmuted",
+            description=f"**{target.display_name}**'s timeout has been removed.",
+            color=discord.Color.green()
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_footer(text=f"Unmuted by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to remove that user's timeout!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .userinfo ──
+@bot.command(name="userinfo")
+async def userinfo_prefix(ctx, *, query: str = None):
+    """View info about a user. Usage: .userinfo [@user]"""
+    target = await _resolve_member(ctx, query)
+    if target is None:
+        return
+    now = discord.utils.utcnow()
+    account_age = (now - target.created_at).days
+    join_age = (now - target.joined_at).days if target.joined_at else 0
+    roles = [r.mention for r in reversed(target.roles) if r.name != "@everyone"]
+    roles_str = " ".join(roles[:10]) if roles else "None"
+    if len(target.roles) - 1 > 10:
+        roles_str += f" *+{len(target.roles) - 11} more*"
+    status_emojis = {
+        discord.Status.online: "🟢 Online",
+        discord.Status.idle: "🟡 Idle",
+        discord.Status.dnd: "🔴 Do Not Disturb",
+        discord.Status.offline: "⚫ Offline",
+    }
+    status = status_emojis.get(target.status, "⚫ Offline")
+    badges = []
+    if target.bot: badges.append("🤖 Bot")
+    if target.guild_permissions.administrator: badges.append("👑 Admin")
+    if target.premium_since: badges.append("💎 Server Booster")
+    embed = discord.Embed(title=f"👤 {target.display_name}", color=target.color if target.color.value != 0 else discord.Color.blurple())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="Username", value=str(target), inline=True)
+    embed.add_field(name="ID", value=target.id, inline=True)
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="Account Created", value=f"{target.created_at.strftime('%b %d, %Y')}\n*{account_age} days ago*", inline=True)
+    embed.add_field(name="Joined Server", value=f"{target.joined_at.strftime('%b %d, %Y') if target.joined_at else 'Unknown'}\n*{join_age} days ago*", inline=True)
+    embed.add_field(name="Nickname", value=target.nick or "None", inline=True)
+    embed.add_field(name=f"Roles ({len(target.roles) - 1})", value=roles_str or "None", inline=False)
+    if badges:
+        embed.add_field(name="Badges", value=" · ".join(badges), inline=False)
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
+# ── .serverinfo ──
+@bot.command(name="serverinfo")
+async def serverinfo_prefix(ctx):
+    """Get server information."""
+    guild = ctx.guild
+    embed = discord.Embed(title=f"🏰 {guild.name}", color=discord.Color.blurple())
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+    embed.add_field(name="ID", value=guild.id, inline=True)
+    embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+    embed.add_field(name="Created", value=guild.created_at.strftime('%B %d, %Y'), inline=True)
+    embed.add_field(name="Members", value=guild.member_count, inline=True)
+    embed.add_field(name="Text Channels", value=len(guild.text_channels), inline=True)
+    embed.add_field(name="Voice Channels", value=len(guild.voice_channels), inline=True)
+    embed.add_field(name="Boost Level", value=guild.premium_tier, inline=True)
+    embed.add_field(name="Boosts", value=guild.premium_subscription_count, inline=True)
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
+# ── .purge ──
+@bot.command(name="purge")
+async def purge_prefix(ctx, amount: int = None):
+    """Delete messages. Usage: .purge <1-100>"""
+    if not ctx.author.guild_permissions.manage_messages:
+        await ctx.send("❌ You need **Manage Messages** permission!")
+        return
+    if amount is None:
+        await ctx.send("❌ Please specify how many messages to delete. Usage: `.purge 10`")
+        return
+    if amount < 1 or amount > 100:
+        await ctx.send("❌ Please choose between 1 and 100 messages.")
+        return
+    try:
+        # +1 to also delete the command message itself
+        deleted = await ctx.channel.purge(limit=amount + 1)
+        msg = await ctx.send(f"🗑️ Deleted **{len(deleted) - 1}** message(s).")
+        await asyncio.sleep(4)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to delete messages here!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .slowmode ──
+@bot.command(name="slowmode")
+async def slowmode_prefix(ctx, seconds: int = None):
+    """Set slowmode for this channel. Usage: .slowmode <0-21600>"""
+    if not ctx.author.guild_permissions.manage_channels:
+        await ctx.send("❌ You need **Manage Channels** permission!")
+        return
+    if seconds is None:
+        await ctx.send("❌ Please specify seconds. Usage: `.slowmode 10` (0 to disable)")
+        return
+    if seconds < 0 or seconds > 21600:
+        await ctx.send("❌ Slowmode must be between 0 and 21600 seconds (6 hours).")
+        return
+    try:
+        await ctx.channel.edit(slowmode_delay=seconds)
+        if seconds == 0:
+            await ctx.send("✅ Slowmode **disabled** for this channel.")
+        else:
+            minutes, secs = divmod(seconds, 60)
+            time_str = f"{minutes}m {secs}s" if minutes else f"{secs}s"
+            await ctx.send(f"✅ Slowmode set to **{time_str}** for this channel.")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to edit this channel!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .coinflip ──
+@bot.command(name="coinflip")
+async def coinflip_prefix(ctx):
+    """Flip a coin!"""
+    result = random.choice(["Heads", "Tails"])
+    emoji = "🪙" if result == "Heads" else "🟤"
+    embed = discord.Embed(
+        title="🪙 Coin Flip",
+        description=f"## {emoji} {result}!",
+        color=discord.Color.gold() if result == "Heads" else discord.Color.dark_grey()
+    )
+    embed.set_footer(text=f"Flipped by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
+# ── .8ball ──
+@bot.command(name="8ball")
+async def eightball_prefix(ctx, *, question: str = None):
+    """Ask the magic 8-ball. Usage: .8ball <question>"""
+    if not question:
+        await ctx.send("❌ Please ask a question! Usage: `.8ball will I pass my exams?`")
+        return
+    answer = random.choice(EIGHTBALL_RESPONSES)
+    embed = discord.Embed(color=discord.Color.dark_purple())
+    embed.add_field(name="🎱 Question", value=question, inline=False)
+    embed.add_field(name="🔮 Answer", value=f"**{answer}**", inline=False)
+    embed.set_footer(text=f"Asked by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
+# ── .kick ──
+@bot.command(name="kick")
+async def kick_prefix(ctx, *, query: str = None):
+    """Kick a member. Usage: .kick @user [reason]"""
+    if not ctx.author.guild_permissions.kick_members:
+        await ctx.send("❌ You need **Kick Members** permission!")
+        return
+    if not query:
+        await ctx.send("❌ Please mention a user or provide a name. Usage: `.kick @user [reason]`")
+        return
+    parts = query.split(None, 1)
+    name_or_mention = parts[0]
+    reason = parts[1] if len(parts) > 1 else None
+    if ctx.message.mentions:
+        target = ctx.message.mentions[0]
+    else:
+        ql = name_or_mention.strip().lower()
+        target = (
+            discord.utils.find(lambda m: m.display_name.lower() == ql, ctx.guild.members)
+            or discord.utils.find(lambda m: m.name.lower() == ql, ctx.guild.members)
+            or discord.utils.find(lambda m: ql in m.display_name.lower(), ctx.guild.members)
+        )
+        if target is None:
+            await ctx.send(f"❌ Couldn't find a member matching **{name_or_mention}**.")
+            return
+    if target == ctx.author:
+        await ctx.send("❌ You can't kick yourself!")
+        return
+    if target.top_role >= ctx.author.top_role and not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ You can't kick someone with an equal or higher role!")
+        return
+    try:
+        embed = discord.Embed(
+            title="👢 Member Kicked",
+            description=(
+                f"**{target.display_name}** has been kicked."
+                + (f"\n**Reason:** {reason}" if reason else "")
+            ),
+            color=discord.Color.orange()
+        )
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_footer(text=f"Kicked by {ctx.author.display_name}")
+        await target.kick(reason=reason)
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to kick that user!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .ban ──
+@bot.command(name="ban")
+async def ban_prefix(ctx, *, query: str = None):
+    """Ban a member. Usage: .ban @user [reason]"""
+    if not ctx.author.guild_permissions.ban_members:
+        await ctx.send("❌ You need **Ban Members** permission!")
+        return
+    if not query:
+        await ctx.send("❌ Usage: `.ban @user [reason]`")
+        return
+    tokens = query.split(None, 1)
+    name_or_mention = tokens[0]
+    reason = tokens[1] if len(tokens) > 1 else None
+    if ctx.message.mentions:
+        target = ctx.message.mentions[0]
+    else:
+        ql = name_or_mention.strip().lower()
+        target = (
+            discord.utils.find(lambda m: m.display_name.lower() == ql, ctx.guild.members)
+            or discord.utils.find(lambda m: m.name.lower() == ql, ctx.guild.members)
+            or discord.utils.find(lambda m: ql in m.display_name.lower(), ctx.guild.members)
+        )
+        if target is None:
+            await ctx.send(f"❌ Couldn't find a member matching **{name_or_mention}**.")
+            return
+    if target == ctx.author:
+        await ctx.send("❌ You can't ban yourself!")
+        return
+    if target.top_role >= ctx.author.top_role and not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ You can't ban someone with an equal or higher role!")
+        return
+    try:
+        desc = f"**{target.display_name}** has been banned."
+        if reason:
+            desc += f"\n**Reason:** {reason}"
+        embed = discord.Embed(title="🔨 Member Banned", description=desc, color=discord.Color.red())
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.set_footer(text=f"Banned by {ctx.author.display_name}")
+        await target.ban(reason=reason, delete_message_days=0)
+        await ctx.send(embed=embed)
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to ban that user!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+
+# ── .unban ──
+@bot.command(name="unban")
+async def unban_prefix(ctx, user_id: str = None, *, reason: str = None):
+    """Unban a user by their ID. Usage: .unban <user_id> [reason]"""
+    if not ctx.author.guild_permissions.ban_members:
+        await ctx.send("❌ You need **Ban Members** permission!")
+        return
+    if not user_id:
+        await ctx.send("❌ Usage: `.unban <user_id> [reason]`")
+        return
+    if not user_id.isdigit():
+        await ctx.send("❌ Invalid user ID — must be a numeric Discord ID.\nUsage: `.unban 123456789012345678`")
+        return
+    try:
+        user = await bot.fetch_user(int(user_id))
+    except discord.NotFound:
+        await ctx.send(f"❌ No Discord user found with ID `{user_id}`.")
+        return
+    except discord.HTTPException as e:
+        await ctx.send(f"❌ Failed to fetch user: {str(e)}")
+        return
+    try:
+        await ctx.guild.unban(user, reason=reason)
+        desc = f"**{user}** (`{user.id}`) has been unbanned."
+        if reason:
+            desc += f"\n**Reason:** {reason}"
+        embed = discord.Embed(title="✅ User Unbanned", description=desc, color=discord.Color.green())
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.set_footer(text=f"Unbanned by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    except discord.NotFound:
+        await ctx.send(f"❌ **{user}** is not banned on this server.")
+    except discord.Forbidden:
+        await ctx.send("❌ I don't have permission to unban users!")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
 
 # ==================== EXISTING COMMANDS ====================
 
