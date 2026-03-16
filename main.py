@@ -421,7 +421,7 @@ async def on_message_delete(message):
         "author_id": message.author.id,
         "author_name": message.author.display_name,
         "author_avatar": message.author.display_avatar.url,
-        "deleted_at": datetime.utcnow().replace(tzinfo=pytz.utc),
+        "deleted_at": datetime.now(datetime.UTC),
         "attachment_url": attachment_url,
     }
 
@@ -966,7 +966,7 @@ async def snipe_command(interaction: discord.Interaction):
         return
 
     # How long ago was it deleted?
-    elapsed = (datetime.utcnow().replace(tzinfo=pytz.utc) - data["deleted_at"]).total_seconds()
+    elapsed = (datetime.now(datetime.UTC) - data["deleted_at"]).total_seconds()
     if elapsed < 60:
         time_ago = f"{int(elapsed)}s ago"
     elif elapsed < 3600:
