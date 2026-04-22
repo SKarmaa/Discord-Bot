@@ -49,6 +49,17 @@ GEMINI_API_KEY = None
 
 TARGET_CHANNEL_ID = 762775973816696863
 
+# Special admin user — always treated as admin regardless of roles
+SPECIAL_ADMIN_ID = 783619741289414676
+
+def is_admin_user(user: discord.Member | discord.User) -> bool:
+    """Return True if the user is the special admin or has the administrator permission."""
+    if user.id == SPECIAL_ADMIN_ID:
+        return True
+    if isinstance(user, discord.Member):
+        return user.guild_permissions.administrator
+    return False
+
 # Confession storage: maps message_id -> author_id (for mod reference only, never shown publicly)
 confession_store = {}
 
@@ -435,7 +446,8 @@ async def on_message(message):
     # AI trigger phrase
     if content_lower.startswith(AI_TRIGGER_PHRASE.lower()):
         user_id = message.author.id
-        is_admin = message.author.guild_permissions.administrator
+        is_admin = is_admin_user(message.author)
+
         if not is_admin:
             can_query, _ = ai_rate_limiter.can_query(user_id)
             if not can_query:
@@ -501,7 +513,7 @@ async def on_message(message):
                 pass
 
 async def handle_moderation_command(message, prompt):
-    if not message.author.guild_permissions.moderate_members:
+    if not (is_admin_user(message.author) or message.author.guild_permissions.moderate_members):
         await message.reply("❌ You don't have permission to use moderation commands!")
         return
     mentioned_users = message.mentions
@@ -907,7 +919,7 @@ async def calendar_command(interaction: discord.Interaction, days: int = 30):
 @bot.tree.command(name="slowmode", description="Set slowmode for the current channel (Moderators only)")
 @app_commands.describe(seconds="Slowmode delay in seconds (0 = disable, max 21600)")
 async def slowmode_command(interaction: discord.Interaction, seconds: int):
-    if not interaction.user.guild_permissions.manage_channels:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_channels):
         await interaction.response.send_message(
             "❌ You need **Manage Channels** permission to use this!", ephemeral=True
         )
@@ -935,7 +947,7 @@ async def slowmode_command(interaction: discord.Interaction, seconds: int):
 @bot.tree.command(name="purge", description="Delete messages from this channel (Moderators only)")
 @app_commands.describe(amount="Number of messages to delete (1–100)")
 async def purge_command(interaction: discord.Interaction, amount: int):
-    if not interaction.user.guild_permissions.manage_messages:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_messages):
         await interaction.response.send_message(
             "❌ You need **Manage Messages** permission to use this!", ephemeral=True
         )
@@ -1248,7 +1260,7 @@ async def define_prefix(ctx, *, word: str = None):
 @bot.command(name="lock")
 async def lock_prefix(ctx, *, reason: str = None):
     """Lock the current channel. Usage: .lock [reason]"""
-    if not ctx.author.guild_permissions.manage_channels:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.manage_channels):
         await ctx.send("❌ You need **Manage Channels** permission!")
         return
     try:
@@ -1268,7 +1280,7 @@ async def lock_prefix(ctx, *, reason: str = None):
 @bot.command(name="unlock")
 async def unlock_prefix(ctx, *, reason: str = None):
     """Unlock the current channel. Usage: .unlock [reason]"""
-    if not ctx.author.guild_permissions.manage_channels:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.manage_channels):
         await ctx.send("❌ You need **Manage Channels** permission!")
         return
     try:
@@ -1306,7 +1318,7 @@ def _format_mute_duration(seconds: int) -> str:
 async def mute_prefix(ctx, *, query: str = None):
     """Timeout a user. Usage: .mute @user [duration] [reason]
     Examples: .mute @user | .mute @user 10m | .mute @user 2h spamming"""
-    if not ctx.author.guild_permissions.moderate_members:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.moderate_members):
         await ctx.send("❌ You need **Timeout Members** permission!")
         return
     if not query:
@@ -1349,7 +1361,7 @@ async def mute_prefix(ctx, *, query: str = None):
     if duration_seconds is not None and duration_seconds > 28 * 86400:
         await ctx.send("❌ Discord's maximum timeout is 28 days.")
         return
-    if target.top_role >= ctx.author.top_role and not ctx.author.guild_permissions.administrator:
+    if target.top_role >= ctx.author.top_role and not is_admin_user(ctx.author):
         await ctx.send("❌ You can't mute someone with an equal or higher role!")
         return
     try:
@@ -1371,7 +1383,7 @@ async def mute_prefix(ctx, *, query: str = None):
 @bot.command(name="unmute")
 async def unmute_prefix(ctx, *, query: str = None):
     """Remove timeout from a user. Usage: .unmute @user"""
-    if not ctx.author.guild_permissions.moderate_members:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.moderate_members):
         await ctx.send("❌ You need **Timeout Members** permission!")
         return
     if not query:
@@ -1457,7 +1469,7 @@ async def serverinfo_prefix(ctx):
 @bot.command(name="purge")
 async def purge_prefix(ctx, amount: int = None):
     """Delete messages. Usage: .purge <1-100>"""
-    if not ctx.author.guild_permissions.manage_messages:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.manage_messages):
         await ctx.send("❌ You need **Manage Messages** permission!")
         return
     if amount is None:
@@ -1484,7 +1496,7 @@ async def purge_prefix(ctx, amount: int = None):
 @bot.command(name="slowmode")
 async def slowmode_prefix(ctx, seconds: int = None):
     """Set slowmode for this channel. Usage: .slowmode <0-21600>"""
-    if not ctx.author.guild_permissions.manage_channels:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.manage_channels):
         await ctx.send("❌ You need **Manage Channels** permission!")
         return
     if seconds is None:
@@ -1538,7 +1550,7 @@ async def eightball_prefix(ctx, *, question: str = None):
 @bot.command(name="kick")
 async def kick_prefix(ctx, *, query: str = None):
     """Kick a member. Usage: .kick @user [reason]"""
-    if not ctx.author.guild_permissions.kick_members:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.kick_members):
         await ctx.send("❌ You need **Kick Members** permission!")
         return
     if not query:
@@ -1562,7 +1574,7 @@ async def kick_prefix(ctx, *, query: str = None):
     if target == ctx.author:
         await ctx.send("❌ You can't kick yourself!")
         return
-    if target.top_role >= ctx.author.top_role and not ctx.author.guild_permissions.administrator:
+    if target.top_role >= ctx.author.top_role and not is_admin_user(ctx.author):
         await ctx.send("❌ You can't kick someone with an equal or higher role!")
         return
     try:
@@ -1587,7 +1599,7 @@ async def kick_prefix(ctx, *, query: str = None):
 @bot.command(name="ban")
 async def ban_prefix(ctx, *, query: str = None):
     """Ban a member. Usage: .ban @user [reason]"""
-    if not ctx.author.guild_permissions.ban_members:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.ban_members):
         await ctx.send("❌ You need **Ban Members** permission!")
         return
     if not query:
@@ -1611,7 +1623,7 @@ async def ban_prefix(ctx, *, query: str = None):
     if target == ctx.author:
         await ctx.send("❌ You can't ban yourself!")
         return
-    if target.top_role >= ctx.author.top_role and not ctx.author.guild_permissions.administrator:
+    if target.top_role >= ctx.author.top_role and not is_admin_user(ctx.author):
         await ctx.send("❌ You can't ban someone with an equal or higher role!")
         return
     try:
@@ -1632,7 +1644,7 @@ async def ban_prefix(ctx, *, query: str = None):
 @bot.command(name="unban")
 async def unban_prefix(ctx, user_id: str = None, *, reason: str = None):
     """Unban a user by their ID. Usage: .unban <user_id> [reason]"""
-    if not ctx.author.guild_permissions.ban_members:
+    if not (is_admin_user(ctx.author) or ctx.author.guild_permissions.ban_members):
         await ctx.send("❌ You need **Ban Members** permission!")
         return
     if not user_id:
@@ -1670,8 +1682,7 @@ async def unban_prefix(ctx, user_id: str = None, *, reason: str = None):
 @bot.tree.command(name="kpwrite", description="Send a message to the general channel")
 @app_commands.describe(message="Message to send")
 async def kpwrite_command(interaction: discord.Interaction, message: str):
-    authorized_user_id = CONFIG.get("write_command_user_id", 0)
-    if interaction.user.id != authorized_user_id:
+    if not is_admin_user(interaction.user):
         await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
         return
     channel_id = CONFIG.get("write_command_channel_id", 0)
@@ -1688,8 +1699,7 @@ async def kpwrite_command(interaction: discord.Interaction, message: str):
 @bot.tree.command(name="kpannounce", description="Send an announcement message")
 @app_commands.describe(message="Announcement message")
 async def kpannounce_command(interaction: discord.Interaction, message: str):
-    authorized_user_id = CONFIG.get("write_command_user_id", 0)
-    if interaction.user.id != authorized_user_id:
+    if not is_admin_user(interaction.user):
         await interaction.response.send_message("❌ You are not authorized to use this command!", ephemeral=True)
         return
     general_channel_id = CONFIG.get("general_channel_id", 0)
@@ -1708,7 +1718,7 @@ async def kpannounce_command(interaction: discord.Interaction, message: str):
 @app_commands.describe(prompt="Your question for AI")
 async def ai_command(interaction: discord.Interaction, prompt: str):
     user_id = interaction.user.id
-    is_admin = interaction.user.guild_permissions.administrator
+    is_admin = is_admin_user(interaction.user)
     if not is_admin:
         can_query, _ = ai_rate_limiter.can_query(user_id)
         if not can_query:
@@ -2304,7 +2314,7 @@ async def afk_listener(message):
 @bot.tree.command(name="lock", description="Lock the current channel so members can't send messages")
 @app_commands.describe(reason="Reason for locking (optional)")
 async def lock_command(interaction: discord.Interaction, reason: str = "No reason provided"):
-    if not interaction.user.guild_permissions.manage_channels:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_channels):
         await interaction.response.send_message("❌ You need **Manage Channels** permission!", ephemeral=True)
         return
 
@@ -2328,7 +2338,7 @@ async def lock_command(interaction: discord.Interaction, reason: str = "No reaso
 @bot.tree.command(name="unlock", description="Unlock the current channel")
 @app_commands.describe(reason="Reason for unlocking (optional)")
 async def unlock_command(interaction: discord.Interaction, reason: str = "No reason provided"):
-    if not interaction.user.guild_permissions.manage_channels:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_channels):
         await interaction.response.send_message("❌ You need **Manage Channels** permission!", ephemeral=True)
         return
 
@@ -2550,7 +2560,7 @@ async def giveaway_command(
     duration: str,
     winners: int = 1
 ):
-    if not interaction.user.guild_permissions.manage_guild:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_guild):
         await interaction.response.send_message(
             "❌ You need **Manage Server** permission to start a giveaway!", ephemeral=True
         )
@@ -2622,7 +2632,7 @@ async def giveaway_command(
 @bot.tree.command(name="giveaway-end", description="Force-end the active giveaway and pick winners now (Moderators only)")
 @app_commands.describe(message_id="The message ID of the giveaway to end")
 async def giveaway_end_command(interaction: discord.Interaction, message_id: str):
-    if not interaction.user.guild_permissions.manage_guild:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_guild):
         await interaction.response.send_message(
             "❌ You need **Manage Server** permission!", ephemeral=True
         )
@@ -2652,7 +2662,7 @@ async def giveaway_end_command(interaction: discord.Interaction, message_id: str
 @bot.tree.command(name="giveaway-reroll", description="Reroll a winner for a recently ended giveaway (Moderators only)")
 @app_commands.describe(message_id="The message ID of the ended giveaway")
 async def giveaway_reroll_command(interaction: discord.Interaction, message_id: str):
-    if not interaction.user.guild_permissions.manage_guild:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.manage_guild):
         await interaction.response.send_message(
             "❌ You need **Manage Server** permission!", ephemeral=True
         )
@@ -2726,7 +2736,7 @@ async def massmove_command(
     from_channel: discord.VoiceChannel,
     to_channel: discord.VoiceChannel
 ):
-    if not interaction.user.guild_permissions.move_members:
+    if not (is_admin_user(interaction.user) or interaction.user.guild_permissions.move_members):
         await interaction.response.send_message(
             "❌ You need **Move Members** permission to use this!", ephemeral=True
         )
