@@ -405,6 +405,8 @@ async def on_ready():
     )
     # Restore any giveaways that were active before restart
     await restore_giveaways()
+    # Start the AHK HTTP bridge for stream control
+    await _start_ahk_server()
 
 @bot.event
 async def on_member_join(member):
@@ -2859,69 +2861,82 @@ async def _get_hwnd_or_fail(ctx: commands.Context, title: str) -> int | None:
     return hwnd
 
 
-# ── Discord stream keybinds ──────────────────────────────────────────────────
-# Set these in Discord → Settings → Keybinds → Add a Keybind:
-#   Action: "Toggle Screenshare"  →  assign e.g. Ctrl+Shift+S
-# Then update STREAM_KEYBIND below to match whatever you set.
-# Note: Discord global keybinds are intercepted by Discord itself at the OS
-# level, so we send the key combo globally (not to a specific window) using
-# keybd_event, which works even when Discord is not the foreground window.
-STREAM_KEYBIND = ("ctrl", "shift", "s")   # ← change to match your Discord keybind
+# ── Discord stream control via AHK HTTP bridge ──────────────────────────────
+# The bot runs a tiny HTTP server on localhost:9876.
+# An AutoHotkey script on your laptop polls it and clicks the Screen button.
+# Setup: run the .ahk file (see instructions) alongside the bot.
 
-_VK_MODIFIER_MAP = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
-KEYEVENTF_KEYUP = 0x0002
+from aiohttp import web as _web
+
+_ahk_command: str = ""          # current pending command for AHK to pick up
+_ahk_app: _web.Application | None = None
+_ahk_runner: _web.AppRunner | None = None
+
+AHK_PORT = 9876
 
 
-def _send_global_hotkey(*keys: str) -> None:
-    """
-    Fire a global hotkey via keybd_event so Discord's global listener catches it
-    regardless of which window is currently focused.
-    """
-    modifiers = [k for k in keys if k in _VK_MODIFIER_MAP]
-    main_keys  = [k for k in keys if k not in _VK_MODIFIER_MAP]
+async def _start_ahk_server():
+    """Start the local HTTP server the AHK script polls."""
+    global _ahk_app, _ahk_runner
+    _ahk_app = _web.Application()
+    _ahk_app.router.add_get("/command", _ahk_get_command)
+    _ahk_app.router.add_post("/done", _ahk_done)
+    _ahk_runner = _web.AppRunner(_ahk_app)
+    await _ahk_runner.setup()
+    site = _web.TCPSite(_ahk_runner, "127.0.0.1", AHK_PORT)
+    await site.start()
+    print(f"✅ AHK bridge listening on http://127.0.0.1:{AHK_PORT}")
 
-    for mod in modifiers:
-        ctypes.windll.user32.keybd_event(_VK_MODIFIER_MAP[mod], 0, 0, 0)
-    for key in main_keys:
-        vk = VK.get(key, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-    for mod in reversed(modifiers):
-        ctypes.windll.user32.keybd_event(_VK_MODIFIER_MAP[mod], 0, KEYEVENTF_KEYUP, 0)
+
+async def _ahk_get_command(request: _web.Request) -> _web.Response:
+    """AHK polls this — returns the pending command and clears it."""
+    global _ahk_command
+    cmd = _ahk_command
+    _ahk_command = ""
+    return _web.Response(text=cmd)
+
+
+async def _ahk_done(request: _web.Request) -> _web.Response:
+    return _web.Response(text="ok")
+
+
+async def _send_ahk_command(cmd: str, timeout: float = 5.0) -> tuple[bool, str]:
+    """Set the pending command and wait up to `timeout` seconds for AHK to pick it up."""
+    global _ahk_command
+    _ahk_command = cmd
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.2)
+        if _ahk_command == "":   # AHK picked it up
+            return True, "OK"
+    _ahk_command = ""
+    return False, "AHK script did not respond in time. Is the .ahk file running?"
 
 
 @bot.command(name="streamstart")
 async def stream_start(ctx: commands.Context):
-    """
-    Start screen-share / Go Live using your Discord global keybind. (Admins only)
-    Set your keybind: Discord → Settings → Keybinds → Toggle Screenshare.
-    Update STREAM_KEYBIND in the bot to match.
-    """
+    """Start Discord screen-share via AutoHotkey bridge. (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    try:
-        await asyncio.get_event_loop().run_in_executor(
-            None, _send_global_hotkey, *STREAM_KEYBIND
-        )
-        await ctx.reply(f"📡 **Stream started!** (sent `{'+'.join(STREAM_KEYBIND)}` globally)")
-    except Exception as e:
-        await ctx.reply(f"❌ Failed to start stream: `{e}`")
+    ok, msg = await _send_ahk_command("streamstart")
+    if ok:
+        await ctx.reply("📡 **Stream started!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
 
 
 @bot.command(name="streamstop")
 async def stream_stop(ctx: commands.Context):
-    """Stop an active Discord screen-share using your Discord global keybind. (Admins only)"""
+    """Stop Discord screen-share via AutoHotkey bridge. (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    try:
-        await asyncio.get_event_loop().run_in_executor(
-            None, _send_global_hotkey, *STREAM_KEYBIND
-        )
-        await ctx.reply(f"🛑 **Stream stopped!** (sent `{'+'.join(STREAM_KEYBIND)}` globally)")
-    except Exception as e:
-        await ctx.reply(f"❌ Failed to stop stream: `{e}`")
+    ok, msg = await _send_ahk_command("streamstop")
+    if ok:
+        await ctx.reply("🛑 **Stream stopped!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
 
 
 # ── Edge browser commands ────────────────────────────────────────────────────
@@ -3098,6 +3113,108 @@ Get-Process msedge -ErrorAction SilentlyContinue |
     else:
         await ctx.reply(f"🪟 **Edge windows:**\n```\n{out[:1800]}\n```")
 
+
+@bot.command(name="testinput")
+async def test_input(ctx: commands.Context):
+    """
+    Open Notepad and type 'hello' into it to verify SendInput works.
+    Watch your screen for 5 seconds after running this. (Admins only)
+    """
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+
+    script = """
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class TestInput {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT {
+        public uint type;
+        public KEYBDINPUT ki;
+        public long padding;
+    }
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    public static void PressKey(ushort vk) {
+        var inp = new INPUT[2];
+        inp[0].type = 1; inp[0].ki.wVk = vk;
+        inp[1].type = 1; inp[1].ki.wVk = vk; inp[1].ki.dwFlags = 2;
+        SendInput(2, inp, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+    }
+}
+"@
+
+# Open Notepad
+$np = Start-Process notepad -PassThru
+Start-Sleep -Milliseconds 1500
+[TestInput]::ShowWindow($np.MainWindowHandle, 9) | Out-Null
+[TestInput]::SetForegroundWindow($np.MainWindowHandle) | Out-Null
+Start-Sleep -Milliseconds 500
+
+# Type H E L L O
+foreach ($vk in @(0x48, 0x45, 0x4C, 0x4C, 0x4F)) {
+    [TestInput]::PressKey($vk)
+    Start-Sleep -Milliseconds 50
+}
+Write-Output "OK - check Notepad for 'hello'"
+"""
+    await ctx.reply("🧪 Opening Notepad and typing 'hello' — watch your screen for 5 seconds...")
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    await ctx.reply(f"Result: `{out[:300]}`")
+
+
+@bot.command(name="debugdiscord")
+async def debug_discord(ctx: commands.Context):
+    """Step-by-step diagnostic for Discord stream commands. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+
+    script = """
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class DbgFocus {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}
+"@
+Write-Output "=== Discord Process Search ==="
+$procs = Get-Process discord -ErrorAction SilentlyContinue
+if ($null -eq $procs) { Write-Output "NO discord process found" }
+else { $procs | ForEach-Object { Write-Output "PID=$($_.Id) Handle=$($_.MainWindowHandle) Title=$($_.MainWindowTitle)" } }
+$proc = $procs | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+if ($null -eq $proc) { Write-Output "NO usable handle"; exit 0 }
+Write-Output "=== Focusing PID $($proc.Id) ==="
+$s = [DbgFocus]::ShowWindow($proc.MainWindowHandle, 9)
+Write-Output "ShowWindow: $s"
+Start-Sleep -Milliseconds 300
+$f = [DbgFocus]::SetForegroundWindow($proc.MainWindowHandle)
+Write-Output "SetForeground: $f"
+Start-Sleep -Milliseconds 500
+$fg = [DbgFocus]::GetForegroundWindow()
+Write-Output "FG handle: $fg expected: $($proc.MainWindowHandle) match: $($fg -eq $proc.MainWindowHandle)"
+Write-Output "=== Sending Alt+S ==="
+[System.Windows.Forms.SendKeys]::SendWait("%(s)")
+Write-Output "SendKeys done"
+"""
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    out = (out or "(no output)")[:1800]
+    await ctx.reply("\U0001f50d **Discord debug:**\n```\n" + out + "\n```")
 
 # ==================== MAIN ====================
 
