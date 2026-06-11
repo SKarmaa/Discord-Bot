@@ -2768,6 +2768,337 @@ async def massmove_command(
 
     await interaction.followup.send(" ".join(parts), ephemeral=False)
 
+# ==================== PC CONTROL (ADMINS ONLY) ====================
+# Works even when the target window is not focused or is behind other windows.
+# Uses ctypes (built-in) to post key messages directly to window handles.
+# Install dependencies: pip install pygetwindow pywin32
+#
+# Access: SPECIAL_ADMIN_ID user + any server member with Administrator permission.
+
+import ctypes
+import ctypes.wintypes
+
+# Windows API constants
+WM_KEYDOWN   = 0x0100
+WM_KEYUP     = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP   = 0x0105
+
+# Virtual key codes
+VK = {
+    "f5":     0x74,
+    "f11":    0x7A,
+    "ctrl":   0x11,
+    "shift":  0x10,
+    "alt":    0x12,
+    "w":      0x57,
+    "s":      0x53,
+    "t":      0x54,
+    "enter":  0x0D,
+}
+
+user32 = ctypes.windll.user32
+
+
+def _find_hwnd(title_fragment: str) -> int | None:
+    """
+    Return the HWND of the first top-level window whose title contains
+    `title_fragment` (case-insensitive), or None if not found.
+    Does NOT require the window to be focused or visible.
+    """
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
+    def enum_cb(hwnd, _):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            if title_fragment.lower() in buf.value.lower():
+                found.append(hwnd)
+        return True
+
+    user32.EnumWindows(enum_cb, 0)
+    return found[0] if found else None
+
+
+def _post_key(hwnd: int, vk: int) -> None:
+    """Post a WM_KEYDOWN + WM_KEYUP pair to a window handle."""
+    user32.PostMessageW(hwnd, WM_KEYDOWN, vk, 0)
+    user32.PostMessageW(hwnd, WM_KEYUP,   vk, 0)
+
+
+def _post_hotkey(hwnd: int, *keys: str) -> None:
+    """
+    Post a combination of keys to a window handle without needing focus.
+    Modifier keys (ctrl, shift, alt) are held via WM_KEYDOWN, the final
+    key is sent, then modifiers are released via WM_KEYUP.
+    """
+    modifiers = [k for k in keys if k in ("ctrl", "shift", "alt")]
+    main_keys  = [k for k in keys if k not in ("ctrl", "shift", "alt")]
+
+    for mod in modifiers:
+        user32.PostMessageW(hwnd, WM_KEYDOWN, VK[mod], 0)
+    for key in main_keys:
+        user32.PostMessageW(hwnd, WM_KEYDOWN, VK[key], 0)
+        user32.PostMessageW(hwnd, WM_KEYUP,   VK[key], 0)
+    for mod in reversed(modifiers):
+        user32.PostMessageW(hwnd, WM_KEYUP, VK[mod], 0)
+
+
+def _pc_admin_check(ctx: commands.Context) -> bool:
+    """Return True if the invoking user is an admin (special ID or server Administrator)."""
+    return is_admin_user(ctx.author)
+
+
+async def _get_hwnd_or_fail(ctx: commands.Context, title: str) -> int | None:
+    """Find a window handle by partial title; reply and return None if not found."""
+    hwnd = await asyncio.get_event_loop().run_in_executor(None, _find_hwnd, title)
+    if not hwnd:
+        await ctx.reply(f"⚠️ Could not find a **{title}** window. Is it open?")
+    return hwnd
+
+
+# ── Discord stream keybinds ──────────────────────────────────────────────────
+# Set these in Discord → Settings → Keybinds → Add a Keybind:
+#   Action: "Toggle Screenshare"  →  assign e.g. Ctrl+Shift+S
+# Then update STREAM_KEYBIND below to match whatever you set.
+# Note: Discord global keybinds are intercepted by Discord itself at the OS
+# level, so we send the key combo globally (not to a specific window) using
+# keybd_event, which works even when Discord is not the foreground window.
+STREAM_KEYBIND = ("ctrl", "shift", "s")   # ← change to match your Discord keybind
+
+_VK_MODIFIER_MAP = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
+KEYEVENTF_KEYUP = 0x0002
+
+
+def _send_global_hotkey(*keys: str) -> None:
+    """
+    Fire a global hotkey via keybd_event so Discord's global listener catches it
+    regardless of which window is currently focused.
+    """
+    modifiers = [k for k in keys if k in _VK_MODIFIER_MAP]
+    main_keys  = [k for k in keys if k not in _VK_MODIFIER_MAP]
+
+    for mod in modifiers:
+        ctypes.windll.user32.keybd_event(_VK_MODIFIER_MAP[mod], 0, 0, 0)
+    for key in main_keys:
+        vk = VK.get(key, 0)
+        ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
+        ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+    for mod in reversed(modifiers):
+        ctypes.windll.user32.keybd_event(_VK_MODIFIER_MAP[mod], 0, KEYEVENTF_KEYUP, 0)
+
+
+@bot.command(name="streamstart")
+async def stream_start(ctx: commands.Context):
+    """
+    Start screen-share / Go Live using your Discord global keybind. (Admins only)
+    Set your keybind: Discord → Settings → Keybinds → Toggle Screenshare.
+    Update STREAM_KEYBIND in the bot to match.
+    """
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, _send_global_hotkey, *STREAM_KEYBIND
+        )
+        await ctx.reply(f"📡 **Stream started!** (sent `{'+'.join(STREAM_KEYBIND)}` globally)")
+    except Exception as e:
+        await ctx.reply(f"❌ Failed to start stream: `{e}`")
+
+
+@bot.command(name="streamstop")
+async def stream_stop(ctx: commands.Context):
+    """Stop an active Discord screen-share using your Discord global keybind. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    try:
+        await asyncio.get_event_loop().run_in_executor(
+            None, _send_global_hotkey, *STREAM_KEYBIND
+        )
+        await ctx.reply(f"🛑 **Stream stopped!** (sent `{'+'.join(STREAM_KEYBIND)}` globally)")
+    except Exception as e:
+        await ctx.reply(f"❌ Failed to stop stream: `{e}`")
+
+
+# ── Edge browser commands ────────────────────────────────────────────────────
+
+def _run_ps(script: str) -> tuple[bool, str]:
+    """Write a PowerShell script to a temp file and run it. Returns (success, output)."""
+    import subprocess, tempfile, os
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8') as f:
+        f.write(script)
+        tmp = f.name
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tmp],
+            capture_output=True, text=True, timeout=15
+        )
+        out = (result.stdout + result.stderr).strip()
+        return result.returncode == 0, out
+    finally:
+        os.unlink(tmp)
+
+
+def _edge_sendkeys(keys: str) -> tuple[bool, str]:
+    """
+    Find the msedge process, bring it to foreground, and send keystrokes.
+    Uses a temp .ps1 file to avoid all inline escaping issues.
+    keys: SendKeys format e.g. '{F5}', '{F11}', '^+k'
+    """
+    script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class WinFocus {{
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+}}
+"@
+
+$proc = Get-Process msedge -ErrorAction SilentlyContinue |
+        Where-Object {{ $_.MainWindowHandle -ne 0 }} |
+        Select-Object -First 1
+
+if ($null -eq $proc) {{
+    Write-Error "NO_EDGE_FOUND"
+    exit 1
+}}
+
+[WinFocus]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
+Start-Sleep -Milliseconds 150
+[WinFocus]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+Start-Sleep -Milliseconds 400
+
+[System.Windows.Forms.SendKeys]::SendWait("{keys}")
+Write-Output "OK"
+"""
+    return _run_ps(script)
+
+
+async def _edge_cmd(ctx, keys: str, success_msg: str) -> None:
+    """Run an Edge SendKeys command and reply with the result."""
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _edge_sendkeys, keys)
+    if ok:
+        await ctx.reply(success_msg)
+    else:
+        if "NO_EDGE_FOUND" in out:
+            await ctx.reply("⚠️ Edge is not open or has no visible window.")
+        else:
+            await ctx.reply(f"⚠️ Command ran but got unexpected output: `{out[:200]}`")
+
+
+@bot.command(name="refresh")
+async def refresh_edge(ctx: commands.Context):
+    """Refresh the active Edge tab. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await _edge_cmd(ctx, "{F5}", "🔄 **Edge refreshed!**")
+
+
+@bot.command(name="openlink")
+async def open_link(ctx: commands.Context, *, url: str = ""):
+    """
+    Open a URL in a new Edge tab. (Admins only)
+    Usage: .openlink https://example.com
+    """
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    if not url:
+        await ctx.reply("❌ Please provide a URL. Example: `.openlink https://youtube.com`")
+        return
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await ctx.reply("❌ URL must start with `http://` or `https://`.")
+        return
+    try:
+        import subprocess
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: subprocess.Popen(["cmd", "/c", "start", "msedge", url], shell=False)
+        )
+        await ctx.reply(f"🌐 **Opening in Edge:** `{url}`")
+    except Exception as e:
+        await ctx.reply(f"❌ Failed to open link: `{e}`")
+
+
+@bot.command(name="closelink")
+async def close_link(ctx: commands.Context):
+    """Close all Edge tabs except the currently active one (Ctrl+Shift+K). (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await _edge_cmd(ctx, "^+k", "❎ **Closed all other Edge tabs!**")
+
+
+@bot.command(name="fullscreen")
+async def fullscreen_edge(ctx: commands.Context):
+    """Toggle Edge fullscreen on/off (F11). (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await _edge_cmd(ctx, "{F11}", "🔲 **Edge fullscreen toggled!**")
+
+
+@bot.command(name="focusedge")
+async def focus_edge(ctx: commands.Context):
+    """Bring the Edge window to the foreground. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    script = """
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class WinFocus2 {
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+}
+"@
+$proc = Get-Process msedge -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowHandle -ne 0 } |
+        Select-Object -First 1
+if ($null -eq $proc) { Write-Error "NO_EDGE_FOUND"; exit 1 }
+[WinFocus2]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
+Start-Sleep -Milliseconds 150
+[WinFocus2]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
+Write-Output "OK"
+"""
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    if ok:
+        await ctx.reply("🪟 **Edge is now focused!**")
+    else:
+        if "NO_EDGE_FOUND" in out:
+            await ctx.reply("⚠️ Edge is not open or has no visible window.")
+        else:
+            await ctx.reply(f"⚠️ Unexpected error: `{out[:200]}`")
+
+
+@bot.command(name="debugwindows")
+async def debug_windows(ctx: commands.Context):
+    """List all msedge processes and their window titles. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    script = """
+Get-Process msedge -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowTitle -ne '' } |
+    Select-Object Id, MainWindowTitle |
+    ForEach-Object { "$($_.Id) | $($_.MainWindowTitle)" }
+"""
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    if not out:
+        await ctx.reply("⚠️ No Edge windows found with titles. Is Edge open?")
+    else:
+        await ctx.reply(f"🪟 **Edge windows:**\n```\n{out[:1800]}\n```")
+
+
 # ==================== MAIN ====================
 
 def main():
