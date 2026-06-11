@@ -3136,6 +3136,19 @@ Write-Output "SendKeys done"
 
 
 
+@bot.command(name="resume")
+async def resume_dgo(ctx: commands.Context):
+    """Click the Resume button on the DGO page in Edge. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ahk_command("resume")
+    if ok:
+        await ctx.reply("▶️ **Resumed!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
 @bot.command(name="debugedge")
 async def debug_edge(ctx: commands.Context):
     if not _pc_admin_check(ctx):
