@@ -2939,74 +2939,7 @@ async def stream_stop(ctx: commands.Context):
         await ctx.reply(f"❌ {msg}")
 
 
-# ── Edge browser commands ────────────────────────────────────────────────────
-
-def _run_ps(script: str) -> tuple[bool, str]:
-    """Write a PowerShell script to a temp file and run it. Returns (success, output)."""
-    import subprocess, tempfile, os
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.ps1', delete=False, encoding='utf-8') as f:
-        f.write(script)
-        tmp = f.name
-    try:
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", tmp],
-            capture_output=True, text=True, timeout=15
-        )
-        out = (result.stdout + result.stderr).strip()
-        return result.returncode == 0, out
-    finally:
-        os.unlink(tmp)
-
-
-def _edge_sendkeys(keys: str) -> tuple[bool, str]:
-    """
-    Find the msedge process, bring it to foreground, and send keystrokes.
-    Uses a temp .ps1 file to avoid all inline escaping issues.
-    keys: SendKeys format e.g. '{F5}', '{F11}', '^+k'
-    """
-    script = f"""
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class WinFocus {{
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-}}
-"@
-
-$proc = Get-Process msedge -ErrorAction SilentlyContinue |
-        Where-Object {{ $_.MainWindowHandle -ne 0 }} |
-        Select-Object -First 1
-
-if ($null -eq $proc) {{
-    Write-Error "NO_EDGE_FOUND"
-    exit 1
-}}
-
-[WinFocus]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
-Start-Sleep -Milliseconds 150
-[WinFocus]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-Start-Sleep -Milliseconds 400
-
-[System.Windows.Forms.SendKeys]::SendWait("{keys}")
-Write-Output "OK"
-"""
-    return _run_ps(script)
-
-
-async def _edge_cmd(ctx, keys: str, success_msg: str) -> None:
-    """Run an Edge SendKeys command and reply with the result."""
-    ok, out = await asyncio.get_event_loop().run_in_executor(None, _edge_sendkeys, keys)
-    if ok:
-        await ctx.reply(success_msg)
-    else:
-        if "NO_EDGE_FOUND" in out:
-            await ctx.reply("⚠️ Edge is not open or has no visible window.")
-        else:
-            await ctx.reply(f"⚠️ Command ran but got unexpected output: `{out[:200]}`")
-
+# ── Edge browser commands (via AHK bridge) ──────────────────────────────────
 
 @bot.command(name="refresh")
 async def refresh_edge(ctx: commands.Context):
@@ -3014,51 +2947,56 @@ async def refresh_edge(ctx: commands.Context):
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    await _edge_cmd(ctx, "{F5}", "🔄 **Edge refreshed!**")
+    ok, msg = await _send_ahk_command("refresh")
+    if ok:
+        await ctx.reply("🔄 **Edge refreshed!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
 
 
 @bot.command(name="openlink")
 async def open_link(ctx: commands.Context, *, url: str = ""):
-    """
-    Open a URL in a new Edge tab. (Admins only)
-    Usage: .openlink https://example.com
-    """
+    """Open a URL in Edge. (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
     if not url:
-        await ctx.reply("❌ Please provide a URL. Example: `.openlink https://youtube.com`")
+        await ctx.reply("❌ Provide a URL. Example: `.openlink https://youtube.com`")
         return
     if not (url.startswith("http://") or url.startswith("https://")):
         await ctx.reply("❌ URL must start with `http://` or `https://`.")
         return
-    try:
-        import subprocess
-        await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.Popen(["cmd", "/c", "start", "msedge", url], shell=False)
-        )
+    ok, msg = await _send_ahk_command(f"openlink {url}")
+    if ok:
         await ctx.reply(f"🌐 **Opening in Edge:** `{url}`")
-    except Exception as e:
-        await ctx.reply(f"❌ Failed to open link: `{e}`")
+    else:
+        await ctx.reply(f"❌ {msg}")
 
 
 @bot.command(name="closelink")
 async def close_link(ctx: commands.Context):
-    """Close all Edge tabs except the currently active one (Ctrl+Shift+K). (Admins only)"""
+    """Close all other Edge tabs except the active one. (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    await _edge_cmd(ctx, "^+k", "❎ **Closed all other Edge tabs!**")
+    ok, msg = await _send_ahk_command("closelink")
+    if ok:
+        await ctx.reply("❎ **Closed all other Edge tabs!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
 
 
 @bot.command(name="fullscreen")
 async def fullscreen_edge(ctx: commands.Context):
-    """Toggle Edge fullscreen on/off (F11). (Admins only)"""
+    """Toggle Edge fullscreen. (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    await _edge_cmd(ctx, "{F11}", "🔲 **Edge fullscreen toggled!**")
+    ok, msg = await _send_ahk_command("fullscreen")
+    if ok:
+        await ctx.reply("🔲 **Edge fullscreen toggled!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
 
 
 @bot.command(name="focusedge")
@@ -3067,32 +3005,11 @@ async def focus_edge(ctx: commands.Context):
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    script = """
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class WinFocus2 {
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-}
-"@
-$proc = Get-Process msedge -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowHandle -ne 0 } |
-        Select-Object -First 1
-if ($null -eq $proc) { Write-Error "NO_EDGE_FOUND"; exit 1 }
-[WinFocus2]::ShowWindow($proc.MainWindowHandle, 9) | Out-Null
-Start-Sleep -Milliseconds 150
-[WinFocus2]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
-Write-Output "OK"
-"""
-    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    ok, msg = await _send_ahk_command("focusedge")
     if ok:
         await ctx.reply("🪟 **Edge is now focused!**")
     else:
-        if "NO_EDGE_FOUND" in out:
-            await ctx.reply("⚠️ Edge is not open or has no visible window.")
-        else:
-            await ctx.reply(f"⚠️ Unexpected error: `{out[:200]}`")
+        await ctx.reply(f"❌ {msg}")
 
 
 @bot.command(name="debugwindows")
@@ -3216,24 +3133,36 @@ Write-Output "SendKeys done"
     out = (out or "(no output)")[:1800]
     await ctx.reply("\U0001f50d **Discord debug:**\n```\n" + out + "\n```")
 
+
+
+
+@bot.command(name="debugedge")
+async def debug_edge(ctx: commands.Context):
+    if not _pc_admin_check(ctx):
+        await ctx.reply("No permission.")
+        return
+    script = "Get-Process | Where-Object { $_.MainWindowTitle -ne \"\" } | Select-Object Name,Id,MainWindowTitle | ForEach-Object { $_.Name + \"|\" + $_.Id + \"|\" + $_.MainWindowTitle }"
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    out = (out or "no output")[:1800]
+    reply = "Windows:" + chr(10) + "```" + chr(10) + out + chr(10) + "```"
+    await ctx.reply(reply)
+
+
 # ==================== MAIN ====================
 
 def main():
     load_bot_data()
     token = os.getenv("TOKEN")
     if not token:
-        print("❌ ERROR: No bot token found!")
-        print("Please create a .env file with:")
-        print("TOKEN=your_bot_token_here")
-        print("GEMINI_API_KEY=your_gemini_api_key_here")
+        print("ERROR: No bot token found!")
         return
     try:
-        print("🚀 Starting Discord Bot...")
+        print("Starting Discord Bot...")
         bot.run(token)
     except discord.LoginFailure:
-        print("❌ ERROR: Invalid bot token!")
+        print("ERROR: Invalid bot token!")
     except Exception as e:
-        print(f"❌ ERROR: Failed to start bot: {e}")
+        print(f"ERROR: Failed to start bot: {e}")
 
 if __name__ == "__main__":
     main()
