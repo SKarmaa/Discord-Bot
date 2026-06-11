@@ -2866,7 +2866,7 @@ async def _get_hwnd_or_fail(ctx: commands.Context, title: str) -> int | None:
 # Note: Discord global keybinds are intercepted by Discord itself at the OS
 # level, so we send the key combo globally (not to a specific window) using
 # keybd_event, which works even when Discord is not the foreground window.
-STREAM_KEYBIND = ("alt", ";")   # ← change to match your Discord keybind
+STREAM_KEYBIND = ("ctrl", "shift", "s")   # ← change to match your Discord keybind
 
 _VK_MODIFIER_MAP = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
 KEYEVENTF_KEYUP = 0x0002
