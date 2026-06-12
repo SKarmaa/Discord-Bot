@@ -3136,6 +3136,31 @@ Write-Output "SendKeys done"
 
 
 
+@bot.command(name="join")
+async def join_vc(ctx: commands.Context):
+    """Join a voice channel using your Discord keybind (Alt+J). (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ahk_command("join")
+    if ok:
+        await ctx.reply("🎙️ **Joining VC!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
+@bot.command(name="disconnect")
+async def disconnect_vc(ctx: commands.Context):
+    """Disconnect from voice channel using your Discord keybind (Alt+D). (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ahk_command("disconnect")
+    if ok:
+        await ctx.reply("🔇 **Disconnected from VC!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
 @bot.command(name="resume")
 async def resume_dgo(ctx: commands.Context):
     """Click the Resume button on the DGO page in Edge. (Admins only)"""
