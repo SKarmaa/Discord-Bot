@@ -3211,9 +3211,9 @@ WC_CACHE_TTL = 600                   # seconds between API refreshes
 WC_MATCH_DURATION = 120              # minutes to assume a match lasts (90 + 30 buffer)
 
 # Pre-match command sequence with 15 s gaps
-WC_PRE_COMMANDS = ["join", "streamstart", "fullscreen", "refresh", "fullscreen", "resume"]
+WC_PRE_COMMANDS = ["join", "streamstart", "refresh", "resume"]
 # Post-match command sequence
-WC_POST_COMMANDS = ["resume", "streamstop"]
+WC_POST_COMMANDS = ["resume", "disconnect"]
 
 
 async def _wc_fetch_matches() -> list[dict]:
