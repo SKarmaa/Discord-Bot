@@ -3217,45 +3217,60 @@ WC_POST_COMMANDS = ["resume", "streamstop"]
 
 
 async def _wc_fetch_matches() -> list[dict]:
-    """Return upcoming / live World Cup matches via the internal sports tool proxy."""
+    """Return all World Cup 2026 matches parsed from openfootball/world-cup.json on GitHub."""
     global _wc_matches_cache, _wc_cache_time
     now = asyncio.get_event_loop().time()
     if _wc_matches_cache and (now - _wc_cache_time) < WC_CACHE_TTL:
         return _wc_matches_cache
 
+    url = "https://raw.githubusercontent.com/openfootball/world-cup.json/master/2026/worldcup.json"
     try:
         async with aiohttp.ClientSession() as session:
-            # Use the public ESPN soccer API – no key required
-            url = (
-                "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
-            )
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
-                    return _wc_matches_cache  # return stale on error
-                data = await resp.json()
+                    print(f"[WC Scheduler] GitHub returned HTTP {resp.status}")
+                    return _wc_matches_cache
+                data = await resp.json(content_type=None)
 
         matches = []
-        for event in data.get("events", []):
-            match_id = str(event.get("id", ""))
-            status_type = (
-                event.get("status", {}).get("type", {}).get("name", "")
-            )
-            # Parse kickoff time (ISO 8601 UTC)
-            date_str = event.get("date", "")
+        for i, m in enumerate(data.get("matches", [])):
+            date_str = m.get("date", "")   # "2026-06-11"
+            time_str = m.get("time", "")   # "13:00 UTC-6"
+            t1 = m.get("team1", "TBD")
+            t2 = m.get("team2", "TBD")
+            name = f"{t1} vs {t2}"
+            score = m.get("score")         # present only when played
+            status = "STATUS_FINAL" if score else "STATUS_SCHEDULED"
+
+            # Parse offset e.g. "UTC-6", "UTC+0", "UTC-4"
+            ko = None
             try:
-                kickoff = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-            except Exception:
+                import re as _re
+                mo = _re.match(r'(\d{2}):(\d{2})\s*UTC([+-]\d+)', time_str)
+                if mo:
+                    h, mi, off = int(mo[1]), int(mo[2]), int(mo[3])
+                    tz_offset = timedelta(hours=off)
+                    ko = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                        hour=h, minute=mi,
+                        tzinfo=timezone(tz_offset)
+                    ).astimezone(timezone.utc)
+            except Exception as parse_err:
+                print(f"[WC Scheduler] Could not parse time for match {i}: {parse_err}")
                 continue
-            name = event.get("name", "Unknown Match")
+
+            if ko is None:
+                continue
+
             matches.append({
-                "id": match_id,
+                "id": f"wc2026_{i}",
                 "name": name,
-                "kickoff": kickoff,
-                "status": status_type,   # "STATUS_SCHEDULED" | "STATUS_IN_PROGRESS" | "STATUS_FINAL"
+                "kickoff": ko,
+                "status": status,
             })
 
         _wc_matches_cache = matches
         _wc_cache_time = now
+        print(f"[WC Scheduler] Loaded {len(matches)} matches from openfootball/world-cup.json")
         return matches
 
     except Exception as e:
