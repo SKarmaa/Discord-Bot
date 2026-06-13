@@ -3225,7 +3225,12 @@ async def _wc_fetch_matches() -> list[dict]:
 
     url = "https://raw.githubusercontent.com/openfootball/world-cup.json/master/2026/worldcup.json"
     try:
-        async with aiohttp.ClientSession() as session:
+        import ssl as _ssl
+        _ssl_ctx = _ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = _ssl.CERT_NONE
+        connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
                     print(f"[WC Scheduler] GitHub returned HTTP {resp.status}")
@@ -3438,7 +3443,12 @@ async def wc_test(ctx: commands.Context):
     await ctx.reply("🔍 Fetching from GitHub...")
     url = "https://raw.githubusercontent.com/openfootball/world-cup.json/master/2026/worldcup.json"
     try:
-        async with aiohttp.ClientSession() as session:
+        import ssl as _ssl
+        _ssl_ctx = _ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = _ssl.CERT_NONE
+        connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(url, timeout=10) as resp:
                 status_code = resp.status
                 raw = await resp.text()
