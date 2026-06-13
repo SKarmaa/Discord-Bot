@@ -407,6 +407,9 @@ async def on_ready():
     await restore_giveaways()
     # Start the AHK HTTP bridge for stream control
     await _start_ahk_server()
+    # Start the World Cup 2026 auto-stream scheduler
+    bot.loop.create_task(_wc_scheduler_loop())
+    print("⚽ World Cup 2026 scheduler armed.")
 
 @bot.event
 async def on_member_join(member):
@@ -3184,6 +3187,231 @@ async def debug_edge(ctx: commands.Context):
     out = (out or "no output")[:1800]
     reply = "Windows:" + chr(10) + "```" + chr(10) + out + chr(10) + "```"
     await ctx.reply(reply)
+
+
+# ==================== WORLD CUP 2026 AUTO-STREAM SCHEDULER ====================
+#
+# 15 minutes before each World Cup match:
+#   .join → .streamstart → .fullscreen → .refresh → .fullscreen → .resume
+#   (15 seconds between each command)
+#
+# After each match ends (90 min + 30 min buffer = 120 min after kickoff):
+#   .resume → .streamstop
+#
+# The scheduler loop checks every 30 seconds.
+# Matches are fetched from the sports API and cached for 10 minutes.
+# Use .wcstatus to see the next scheduled match and countdown.
+# Use .wcenable / .wcdisable to toggle the scheduler on/off.
+
+WC_SCHEDULER_ENABLED = True          # toggle with .wcenable / .wcdisable
+_wc_scheduled: dict[str, str] = {}   # match_id → "pre" | "post" | "done"
+_wc_matches_cache: list[dict] = []
+_wc_cache_time: float = 0.0
+WC_CACHE_TTL = 600                   # seconds between API refreshes
+WC_MATCH_DURATION = 120              # minutes to assume a match lasts (90 + 30 buffer)
+
+# Pre-match command sequence with 15 s gaps
+WC_PRE_COMMANDS = ["join", "streamstart", "fullscreen", "refresh", "fullscreen", "resume"]
+# Post-match command sequence
+WC_POST_COMMANDS = ["resume", "streamstop"]
+
+
+async def _wc_fetch_matches() -> list[dict]:
+    """Return upcoming / live World Cup matches via the internal sports tool proxy."""
+    global _wc_matches_cache, _wc_cache_time
+    now = asyncio.get_event_loop().time()
+    if _wc_matches_cache and (now - _wc_cache_time) < WC_CACHE_TTL:
+        return _wc_matches_cache
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Use the public ESPN soccer API – no key required
+            url = (
+                "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard"
+            )
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    return _wc_matches_cache  # return stale on error
+                data = await resp.json()
+
+        matches = []
+        for event in data.get("events", []):
+            match_id = str(event.get("id", ""))
+            status_type = (
+                event.get("status", {}).get("type", {}).get("name", "")
+            )
+            # Parse kickoff time (ISO 8601 UTC)
+            date_str = event.get("date", "")
+            try:
+                kickoff = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            except Exception:
+                continue
+            name = event.get("name", "Unknown Match")
+            matches.append({
+                "id": match_id,
+                "name": name,
+                "kickoff": kickoff,
+                "status": status_type,   # "STATUS_SCHEDULED" | "STATUS_IN_PROGRESS" | "STATUS_FINAL"
+            })
+
+        _wc_matches_cache = matches
+        _wc_cache_time = now
+        return matches
+
+    except Exception as e:
+        print(f"[WC Scheduler] Failed to fetch matches: {e}")
+        return _wc_matches_cache
+
+
+async def _wc_run_sequence(commands: list[str], label: str, channel: discord.TextChannel):
+    """Send a sequence of AHK commands with 15-second gaps, posting status in channel."""
+    await channel.send(f"⚽ **World Cup Auto-Scheduler** › {label} — starting sequence…")
+    for i, cmd in enumerate(commands):
+        ok, msg = await _send_ahk_command(cmd, timeout=8.0)
+        emoji = "✅" if ok else "❌"
+        await channel.send(f"{emoji} `.{cmd}` {'done' if ok else f'failed: {msg}'}")
+        if i < len(commands) - 1:
+            await asyncio.sleep(15)
+    await channel.send(f"✅ **Sequence complete!**")
+
+
+async def _wc_scheduler_loop():
+    """Background task — polls every 30 s and fires commands at the right times."""
+    await bot.wait_until_ready()
+    print("⚽ World Cup scheduler started.")
+
+    while not bot.is_closed():
+        if not WC_SCHEDULER_ENABLED:
+            await asyncio.sleep(30)
+            continue
+
+        channel = bot.get_channel(TARGET_CHANNEL_ID)
+        if channel is None:
+            await asyncio.sleep(30)
+            continue
+
+        try:
+            matches = await _wc_fetch_matches()
+            now_utc = datetime.now(timezone.utc)
+
+            for match in matches:
+                mid = match["id"]
+                kickoff: datetime = match["kickoff"]
+                name: str = match["name"]
+                minutes_to_start = (kickoff - now_utc).total_seconds() / 60
+                minutes_since_start = (now_utc - kickoff).total_seconds() / 60
+
+                # ── PRE-MATCH: 15 min window before kickoff (14–16 min before) ──
+                pre_key = f"{mid}_pre"
+                if (
+                    14 <= minutes_to_start <= 16
+                    and pre_key not in _wc_scheduled
+                ):
+                    _wc_scheduled[pre_key] = "fired"
+                    print(f"[WC Scheduler] PRE-MATCH sequence for: {name}")
+                    asyncio.create_task(
+                        _wc_run_sequence(
+                            WC_PRE_COMMANDS,
+                            f"Pre-match — **{name}** kicks off in ~15 min!",
+                            channel,
+                        )
+                    )
+
+                # ── POST-MATCH: ~120 min after kickoff ──
+                post_key = f"{mid}_post"
+                if (
+                    WC_MATCH_DURATION <= minutes_since_start <= WC_MATCH_DURATION + 2
+                    and post_key not in _wc_scheduled
+                    and match["status"] in ("STATUS_FINAL", "STATUS_IN_PROGRESS", "")
+                ):
+                    _wc_scheduled[post_key] = "fired"
+                    print(f"[WC Scheduler] POST-MATCH sequence for: {name}")
+                    asyncio.create_task(
+                        _wc_run_sequence(
+                            WC_POST_COMMANDS,
+                            f"Post-match — **{name}** has ended!",
+                            channel,
+                        )
+                    )
+
+        except Exception as e:
+            print(f"[WC Scheduler] Loop error: {e}")
+
+        await asyncio.sleep(30)
+
+
+# ── Admin commands ────────────────────────────────────────────────────────────
+
+@bot.command(name="wcenable")
+async def wc_enable(ctx: commands.Context):
+    """Enable the World Cup auto-stream scheduler. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    global WC_SCHEDULER_ENABLED
+    WC_SCHEDULER_ENABLED = True
+    await ctx.reply("✅ ⚽ World Cup auto-stream scheduler **enabled**!")
+
+
+@bot.command(name="wcdisable")
+async def wc_disable(ctx: commands.Context):
+    """Disable the World Cup auto-stream scheduler. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    global WC_SCHEDULER_ENABLED
+    WC_SCHEDULER_ENABLED = False
+    await ctx.reply("🛑 World Cup auto-stream scheduler **disabled**.")
+
+
+@bot.command(name="wcstatus")
+async def wc_status(ctx: commands.Context):
+    """Show upcoming World Cup matches and scheduler status."""
+    status_str = "✅ Enabled" if WC_SCHEDULER_ENABLED else "🛑 Disabled"
+    matches = await _wc_fetch_matches()
+    now_utc = datetime.now(timezone.utc)
+    nepal_tz = pytz.timezone("Asia/Kathmandu")
+
+    upcoming = sorted(
+        [m for m in matches if m["kickoff"] > now_utc],
+        key=lambda m: m["kickoff"]
+    )[:5]
+
+    embed = discord.Embed(
+        title="⚽ World Cup 2026 Auto-Stream Scheduler",
+        color=discord.Color.green() if WC_SCHEDULER_ENABLED else discord.Color.red(),
+    )
+    embed.add_field(name="Status", value=status_str, inline=False)
+
+    if upcoming:
+        lines = []
+        for m in upcoming:
+            local_kick = m["kickoff"].astimezone(nepal_tz)
+            mins_away = int((m["kickoff"] - now_utc).total_seconds() / 60)
+            pre_fired = "✅" if f"{m['id']}_pre" in _wc_scheduled else "⏳"
+            post_fired = "✅" if f"{m['id']}_post" in _wc_scheduled else "⏳"
+            lines.append(
+                f"**{m['name']}**\n"
+                f"🕐 {local_kick.strftime('%b %d, %H:%M')} NPT (in {mins_away} min)\n"
+                f"Pre: {pre_fired}  Post: {post_fired}"
+            )
+        embed.add_field(name="Upcoming Matches", value="\n\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="Upcoming Matches", value="No upcoming matches found.", inline=False)
+
+    embed.set_footer(text="Pre-match fires 15 min before kickoff • Post-match fires ~120 min after kickoff")
+    await ctx.reply(embed=embed)
+
+
+@bot.command(name="wcreset")
+async def wc_reset(ctx: commands.Context):
+    """Clear the scheduler's fired-match memory (re-arm all matches). (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    _wc_scheduled.clear()
+    _wc_matches_cache.clear()
+    await ctx.reply("🔄 World Cup scheduler state reset — all matches re-armed!")
 
 
 # ==================== MAIN ====================
