@@ -3383,6 +3383,11 @@ async def wc_disable(ctx: commands.Context):
 async def wc_status(ctx: commands.Context):
     """Show upcoming World Cup matches and scheduler status."""
     status_str = "✅ Enabled" if WC_SCHEDULER_ENABLED else "🛑 Disabled"
+
+    # Force a fresh fetch every time (bypass cache) so status is always live
+    global _wc_matches_cache, _wc_cache_time
+    _wc_cache_time = 0.0  # expire cache so we always re-fetch on .wcstatus
+
     matches = await _wc_fetch_matches()
     now_utc = datetime.now(timezone.utc)
     nepal_tz = pytz.timezone("Asia/Kathmandu")
@@ -3397,6 +3402,7 @@ async def wc_status(ctx: commands.Context):
         color=discord.Color.green() if WC_SCHEDULER_ENABLED else discord.Color.red(),
     )
     embed.add_field(name="Status", value=status_str, inline=False)
+    embed.add_field(name="Matches Loaded", value=f"{len(matches)} total / {len(upcoming)} upcoming", inline=False)
 
     if upcoming:
         lines = []
@@ -3412,10 +3418,65 @@ async def wc_status(ctx: commands.Context):
             )
         embed.add_field(name="Upcoming Matches", value="\n\n".join(lines), inline=False)
     else:
-        embed.add_field(name="Upcoming Matches", value="No upcoming matches found.", inline=False)
+        embed.add_field(
+            name="Upcoming Matches",
+            value="No upcoming matches found.\n⚠️ Run `.wctest` to diagnose the fetch.",
+            inline=False
+        )
 
     embed.set_footer(text="Pre-match fires 15 min before kickoff • Post-match fires ~120 min after kickoff")
     await ctx.reply(embed=embed)
+
+
+@bot.command(name="wctest")
+async def wc_test(ctx: commands.Context):
+    """Diagnose the World Cup match fetch — shows raw results. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+
+    await ctx.reply("🔍 Fetching from GitHub...")
+    url = "https://raw.githubusercontent.com/openfootball/world-cup.json/master/2026/worldcup.json"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                status_code = resp.status
+                raw = await resp.text()
+
+        if status_code != 200:
+            await ctx.reply(f"❌ HTTP {status_code}\n```{raw[:300]}```")
+            return
+
+        import json as _json
+        data = _json.loads(raw)
+        all_matches = data.get("matches", [])
+        now_utc = datetime.now(timezone.utc)
+        nepal_tz = pytz.timezone("Asia/Kathmandu")
+
+        parsed = []
+        for i, m in enumerate(all_matches):
+            date_str = m.get("date", "")
+            time_str = m.get("time", "")
+            mo = re.match(r'(\d{2}):(\d{2})\s*UTC([+-]\d+)', time_str)
+            if mo:
+                h, mi, off = int(mo[1]), int(mo[2]), int(mo[3])
+                ko = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                    hour=h, minute=mi,
+                    tzinfo=timezone(timedelta(hours=off))
+                ).astimezone(timezone.utc)
+                parsed.append((ko, m.get("team1","?"), m.get("team2","?")))
+
+        upcoming = sorted([(ko, t1, t2) for ko, t1, t2 in parsed if ko > now_utc])
+        lines = [f"✅ HTTP {status_code} — {len(all_matches)} matches in JSON, {len(parsed)} parsed, {len(upcoming)} upcoming\n"]
+        for ko, t1, t2 in upcoming[:8]:
+            npt = ko.astimezone(nepal_tz)
+            mins = int((ko - now_utc).total_seconds() / 60)
+            lines.append(f"`{npt.strftime('%b %d %H:%M')} NPT` (+{mins}m) — {t1} vs {t2}")
+
+        await ctx.reply("\n".join(lines))
+
+    except Exception as e:
+        await ctx.reply(f"❌ Exception: `{type(e).__name__}: {e}`")
 
 
 @bot.command(name="wcreset")
