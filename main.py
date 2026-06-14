@@ -3321,10 +3321,11 @@ async def _wc_scheduler_loop():
                 minutes_to_start = (kickoff - now_utc).total_seconds() / 60
                 minutes_since_start = (now_utc - kickoff).total_seconds() / 60
 
-                # ── PRE-MATCH: 15 min window before kickoff (14–16 min before) ──
+                # ── PRE-MATCH: fire when between 10–16 min before kickoff ──
+                # Wide window (10–16 min) so the 30s loop never misses it
                 pre_key = f"{mid}_pre"
                 if (
-                    14 <= minutes_to_start <= 16
+                    10 <= minutes_to_start <= 16
                     and pre_key not in _wc_scheduled
                 ):
                     _wc_scheduled[pre_key] = "fired"
@@ -3337,12 +3338,13 @@ async def _wc_scheduler_loop():
                         )
                     )
 
-                # ── POST-MATCH: ~120 min after kickoff ──
+                # ── POST-MATCH: fire once match duration has elapsed ──
+                # No status check — openfootball JSON uses STATUS_SCHEDULED for all;
+                # instead just rely on time (120 min after kickoff = safe "match over")
                 post_key = f"{mid}_post"
                 if (
-                    WC_MATCH_DURATION <= minutes_since_start <= WC_MATCH_DURATION + 2
+                    WC_MATCH_DURATION <= minutes_since_start <= WC_MATCH_DURATION + 6
                     and post_key not in _wc_scheduled
-                    and match["status"] in ("STATUS_FINAL", "STATUS_IN_PROGRESS", "")
                 ):
                     _wc_scheduled[post_key] = "fired"
                     print(f"[WC Scheduler] POST-MATCH sequence for: {name}")
