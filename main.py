@@ -3249,6 +3249,15 @@ def _fd_headers() -> dict:
     return h
 
 
+def _fd_ssl() -> "ssl.SSLContext":
+    """Disabled-verification SSL context — fixes Windows CA bundle issues."""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 async def _wc_fetch_matches() -> list[dict]:
     """
     Fetch World Cup 2026 matches from football-data.org.
@@ -3273,7 +3282,7 @@ async def _wc_fetch_matches() -> list[dict]:
 
     url = f"{_FD_BASE}/competitions/{_FD_WC_COMPETITION}/matches"
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=_fd_ssl())) as session:
             async with session.get(url, headers=_fd_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 403:
                     print("[WC Scheduler] football-data.org: 403 — add FOOTBALL_DATA_API_KEY to .env")
@@ -3453,7 +3462,7 @@ async def _wc_fetch_live_match(match_id: str) -> dict | None:
     """
     url = f"{_FD_BASE}/matches/{match_id}"
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=_fd_ssl())) as session:
             async with session.get(url, headers=_fd_headers(), timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status != 200:
                     return None
@@ -3643,49 +3652,70 @@ async def wc_scores_cmd(ctx: commands.Context):
 
 @bot.command(name="wcscore")
 async def wc_score_cmd(ctx: commands.Context, *, team: str = ""):
-    """Show the live/latest score for a specific team (or all live if no team given)."""
+    """Show the live/latest score for a specific team, or next upcoming match if nothing is live."""
     global _wc_cache_time
     _wc_cache_time = 0.0
-    matches = await _wc_fetch_matches()
-    now_utc = datetime.now(timezone.utc)
+    matches  = await _wc_fetch_matches()
+    now_utc  = datetime.now(timezone.utc)
+    nepal_tz = pytz.timezone("Asia/Kathmandu")
 
     if team:
-        # Search by team name (case-insensitive substring)
         team_lower = team.lower()
-        candidates = [
-            m for m in matches
-            if team_lower in m["name"].lower()
-            and m["status"] not in ("TIMED", "POSTPONED", "CANCELLED")
-        ]
-        # Also check upcoming if nothing active
+        # Prefer live/finished matches for this team first
+        candidates = sorted(
+            [m for m in matches if team_lower in m["name"].lower()],
+            key=lambda m: m["kickoff"], reverse=True
+        )
         if not candidates:
-            candidates = sorted(
-                [m for m in matches if team_lower in m["name"].lower() and m["kickoff"] > now_utc],
-                key=lambda m: m["kickoff"]
-            )[:1]
-        if not candidates:
-            await ctx.reply(f"❌ Couldn't find a match for **{team}**. Check the spelling.")
+            await ctx.reply(f"❌ No matches found for **{team}**. Check the spelling or use `.wcstatus` to see teams.")
             return
         match = candidates[0]
-    else:
-        # No team — find a live match or the most recent one
-        live = [m for m in matches if m["status"] in ("IN_PLAY", "PAUSED")]
-        if live:
-            match = live[0]
-        else:
-            recent = sorted(
-                [m for m in matches if m["status"] == "FINISHED"],
-                key=lambda m: m["kickoff"], reverse=True
-            )
-            if recent:
-                match = recent[0]
-            else:
-                await ctx.reply("⚽ No live matches right now. Use `.wcscores` to see upcoming.")
-                return
+        raw   = await _wc_fetch_live_match(match["id"])
+        embed = _wc_score_embed(match, raw)
 
-    raw   = await _wc_fetch_live_match(match["id"])
-    embed = _wc_score_embed(match, raw)
-    await ctx.reply(embed=embed)
+        # If it's a future match, add kickoff info
+        if match["status"] == "TIMED":
+            npt  = match["kickoff"].astimezone(nepal_tz).strftime("%b %d, %H:%M NPT")
+            mins = int((match["kickoff"] - now_utc).total_seconds() / 60)
+            await ctx.reply(f"⏳ **{match['name']}** hasn't kicked off yet.\n🕐 Kickoff: **{npt}** (in {mins} min)", embed=embed)
+        else:
+            await ctx.reply(embed=embed)
+        return
+
+    # No team specified — live > most recent finished > next upcoming
+    live = [m for m in matches if m["status"] in ("IN_PLAY", "PAUSED")]
+    if live:
+        raw   = await _wc_fetch_live_match(live[0]["id"])
+        embed = _wc_score_embed(live[0], raw)
+        await ctx.reply(embed=embed)
+        return
+
+    recent = sorted(
+        [m for m in matches if m["status"] == "FINISHED"],
+        key=lambda m: m["kickoff"], reverse=True
+    )
+    if recent:
+        raw   = await _wc_fetch_live_match(recent[0]["id"])
+        embed = _wc_score_embed(recent[0], raw)
+        await ctx.reply(f"✅ Most recent result:", embed=embed)
+        return
+
+    # Nothing live or finished — show next upcoming
+    upcoming = sorted(
+        [m for m in matches if m["kickoff"] > now_utc],
+        key=lambda m: m["kickoff"]
+    )
+    if upcoming:
+        nxt  = upcoming[0]
+        npt  = nxt["kickoff"].astimezone(nepal_tz).strftime("%b %d, %H:%M NPT")
+        mins = int((nxt["kickoff"] - now_utc).total_seconds() / 60)
+        await ctx.reply(
+            f"⚽ No matches live or finished yet.\n"
+            f"Next: **{nxt['name']}** — {npt} (in {mins} min)\n"
+            f"Use `.wcstatus` for the full schedule."
+        )
+    else:
+        await ctx.reply("⚽ No World Cup matches found. Try `.wctest` to check the API.")
 
 
 # ── Admin commands ────────────────────────────────────────────────────────────
@@ -3784,7 +3814,7 @@ async def wc_test(ctx: commands.Context):
 
     url = f"{_FD_BASE}/competitions/{_FD_WC_COMPETITION}/matches"
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=_fd_ssl())) as session:
             async with session.get(url, headers=_fd_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 status_code = resp.status
                 data        = await resp.json()
