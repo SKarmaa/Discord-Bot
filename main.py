@@ -409,7 +409,9 @@ async def on_ready():
     await _start_ahk_server()
     # Start the World Cup 2026 auto-stream scheduler
     bot.loop.create_task(_wc_scheduler_loop())
-    print("⚽ World Cup 2026 scheduler armed.")
+    # Start the World Cup 2026 live score tracker
+    bot.loop.create_task(_wc_live_score_loop())
+    print("⚽ World Cup 2026 scheduler + live score tracker armed.")
 
 @bot.event
 async def on_member_join(member):
@@ -3191,95 +3193,125 @@ async def debug_edge(ctx: commands.Context):
 
 # ==================== WORLD CUP 2026 AUTO-STREAM SCHEDULER ====================
 #
-# 15 minutes before each World Cup match:
-#   .join → .streamstart → .fullscreen → .refresh → .fullscreen → .resume
-#   (15 seconds between each command)
+# Uses football-data.org free API (sign up at football-data.org for a free key).
+# Add FOOTBALL_DATA_API_KEY=your_key to your .env file.
 #
-# After each match ends (90 min + 30 min buffer = 120 min after kickoff):
-#   .resume → .streamstop
+# HOW IT WORKS:
+#   - Polls football-data.org every 30 s (60 s during live matches)
+#   - PRE-MATCH: fires the stream-start sequence exactly 15 min before kickoff
+#     (window: 14:30–15:30 before kickoff so the 30s loop never misses it)
+#   - POST-MATCH: fires the stream-stop sequence 5 min after the API reports
+#     status = FINISHED (real game-end, not a time guess).
+#     Fallback: if API never updates, fires 130 min after kickoff.
 #
-# The scheduler loop checks every 30 seconds.
-# Matches are fetched from the sports API and cached for 10 minutes.
-# Use .wcstatus to see the next scheduled match and countdown.
-# Use .wcenable / .wcdisable to toggle the scheduler on/off.
+# Match statuses from football-data.org:
+#   TIMED      – scheduled, not started yet
+#   IN_PLAY    – currently playing (1st half)
+#   PAUSED     – half-time
+#   FINISHED   – full-time (or AET/penalties done)
+#   POSTPONED / CANCELLED / SUSPENDED
+#
+# Commands:
+#   .wcenable / .wcdisable  – toggle scheduler
+#   .wcstatus               – show upcoming matches + scheduler state
+#   .wctest                 – live API diagnostic
+#   .wcreset                – clear fired-match memory (re-arm all)
 
-WC_SCHEDULER_ENABLED = True          # toggle with .wcenable / .wcdisable
-_wc_scheduled: dict[str, str] = {}   # match_id → "pre" | "post" | "done"
+WC_SCHEDULER_ENABLED = True           # toggle with .wcenable / .wcdisable
+_wc_scheduled: dict[str, str] = {}    # "{match_id}_pre" | "{match_id}_post" → "fired"
 _wc_matches_cache: list[dict] = []
 _wc_cache_time: float = 0.0
-WC_CACHE_TTL = 600                   # seconds between API refreshes
-WC_MATCH_DURATION = 120              # minutes to assume a match lasts (90 + 30 buffer)
+_wc_finished_at: dict[str, datetime] = {}  # match_id → UTC time we first saw FINISHED
+WC_CACHE_TTL_IDLE = 600               # seconds between refreshes when no match is near
+WC_CACHE_TTL_LIVE = 60               # seconds between refreshes when a match is live/close
+WC_PRE_WINDOW_LOW  = 14.5            # minutes before kickoff — start of firing window
+WC_PRE_WINDOW_HIGH = 15.5            # minutes before kickoff — end of firing window
+WC_POST_DELAY      = 5               # minutes after FINISHED before firing post-sequence
+WC_FALLBACK_MINUTES = 130            # fallback: fire post-match N min after kickoff if API stale
 
-# Pre-match command sequence with 15 s gaps
-WC_PRE_COMMANDS = ["join", "streamstart", "refresh", "resume"]
+# Pre-match command sequence (15 s gaps between each)
+WC_PRE_COMMANDS  = ["join", "streamstart", "refresh", "resume"]
 # Post-match command sequence
 WC_POST_COMMANDS = ["resume", "disconnect"]
 
+# football-data.org — free tier, 10 req/min, no cost
+# World Cup 2026 competition code: WC   (id: 2000)
+_FD_BASE = "https://api.football-data.org/v4"
+_FD_WC_COMPETITION = "WC"   # or use numeric id 2000
+
+
+def _fd_headers() -> dict:
+    """Return auth headers for football-data.org. Key is optional on free tier but required for WC."""
+    key = os.getenv("FOOTBALL_DATA_API_KEY", "")
+    h = {"Accept": "application/json"}
+    if key:
+        h["X-Auth-Token"] = key
+    return h
+
 
 async def _wc_fetch_matches() -> list[dict]:
-    """Return all World Cup 2026 matches parsed from openfootball/world-cup.json on GitHub."""
+    """
+    Fetch World Cup 2026 matches from football-data.org.
+    Returns list of dicts with keys: id, name, kickoff (UTC datetime), status.
+    Status values: TIMED | IN_PLAY | PAUSED | FINISHED | POSTPONED | CANCELLED
+    Falls back to cached data on error.
+    """
     global _wc_matches_cache, _wc_cache_time
-    now = asyncio.get_event_loop().time()
-    if _wc_matches_cache and (now - _wc_cache_time) < WC_CACHE_TTL:
+
+    # Decide cache TTL: shorter when a match is live or starting soon
+    now_loop = asyncio.get_event_loop().time()
+    now_utc  = datetime.now(timezone.utc)
+    is_close = any(
+        abs((m["kickoff"] - now_utc).total_seconds()) < 7200   # within 2 hours of kickoff
+        or m["status"] in ("IN_PLAY", "PAUSED")
+        for m in _wc_matches_cache
+    )
+    ttl = WC_CACHE_TTL_LIVE if is_close else WC_CACHE_TTL_IDLE
+
+    if _wc_matches_cache and (now_loop - _wc_cache_time) < ttl:
         return _wc_matches_cache
 
-    url = "https://raw.githubusercontent.com/openfootball/world-cup.json/master/2026/worldcup.json"
+    url = f"{_FD_BASE}/competitions/{_FD_WC_COMPETITION}/matches"
     try:
-        import ssl as _ssl
-        _ssl_ctx = _ssl.create_default_context()
-        _ssl_ctx.check_hostname = False
-        _ssl_ctx.verify_mode = _ssl.CERT_NONE
-        connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(url, timeout=10) as resp:
-                if resp.status != 200:
-                    print(f"[WC Scheduler] GitHub returned HTTP {resp.status}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_fd_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 403:
+                    print("[WC Scheduler] football-data.org: 403 — add FOOTBALL_DATA_API_KEY to .env")
                     return _wc_matches_cache
-                data = await resp.json(content_type=None)
+                if resp.status != 200:
+                    print(f"[WC Scheduler] football-data.org HTTP {resp.status}")
+                    return _wc_matches_cache
+                data = await resp.json()
 
         matches = []
-        for i, m in enumerate(data.get("matches", [])):
-            date_str = m.get("date", "")   # "2026-06-11"
-            time_str = m.get("time", "")   # "13:00 UTC-6"
-            t1 = m.get("team1", "TBD")
-            t2 = m.get("team2", "TBD")
-            name = f"{t1} vs {t2}"
-            score = m.get("score")         # present only when played
-            status = "STATUS_FINAL" if score else "STATUS_SCHEDULED"
+        for m in data.get("matches", []):
+            mid     = str(m.get("id", ""))
+            status  = m.get("status", "TIMED")           # TIMED | IN_PLAY | PAUSED | FINISHED …
+            utc_str = m.get("utcDate", "")               # "2026-06-11T16:00:00Z"
+            home    = m.get("homeTeam", {}).get("shortName") or m.get("homeTeam", {}).get("name", "TBD")
+            away    = m.get("awayTeam", {}).get("shortName") or m.get("awayTeam", {}).get("name", "TBD")
+            name    = f"{home} vs {away}"
 
-            # Parse offset e.g. "UTC-6", "UTC+0", "UTC-4"
-            ko = None
             try:
-                import re as _re
-                mo = _re.match(r'(\d{2}):(\d{2})\s*UTC([+-]\d+)', time_str)
-                if mo:
-                    h, mi, off = int(mo[1]), int(mo[2]), int(mo[3])
-                    tz_offset = timedelta(hours=off)
-                    ko = datetime.strptime(date_str, "%Y-%m-%d").replace(
-                        hour=h, minute=mi,
-                        tzinfo=timezone(tz_offset)
-                    ).astimezone(timezone.utc)
-            except Exception as parse_err:
-                print(f"[WC Scheduler] Could not parse time for match {i}: {parse_err}")
-                continue
-
-            if ko is None:
+                ko = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+            except Exception:
                 continue
 
             matches.append({
-                "id": f"wc2026_{i}",
-                "name": name,
+                "id":      mid,
+                "name":    name,
                 "kickoff": ko,
-                "status": status,
+                "status":  status,
             })
 
         _wc_matches_cache = matches
-        _wc_cache_time = now
-        print(f"[WC Scheduler] Loaded {len(matches)} matches from openfootball/world-cup.json")
+        _wc_cache_time    = now_loop
+        live_count = sum(1 for m in matches if m["status"] in ("IN_PLAY", "PAUSED"))
+        print(f"[WC Scheduler] Loaded {len(matches)} WC matches ({live_count} live) from football-data.org")
         return matches
 
     except Exception as e:
-        print(f"[WC Scheduler] Failed to fetch matches: {e}")
+        print(f"[WC Scheduler] Fetch error: {e}")
         return _wc_matches_cache
 
 
@@ -3292,13 +3324,35 @@ async def _wc_run_sequence(commands: list[str], label: str, channel: discord.Tex
         await channel.send(f"{emoji} `.{cmd}` {'done' if ok else f'failed: {msg}'}")
         if i < len(commands) - 1:
             await asyncio.sleep(15)
-    await channel.send(f"✅ **Sequence complete!**")
+    await channel.send("✅ **Sequence complete!**")
 
 
 async def _wc_scheduler_loop():
     """Background task — polls every 30 s and fires commands at the right times."""
     await bot.wait_until_ready()
-    print("⚽ World Cup scheduler started.")
+    print("⚽ World Cup scheduler started (football-data.org live status).")
+
+    # ── Startup guard: pre-mark all already-FINISHED/past matches so we never
+    #    fire post-match commands for games that ended before this session. ──
+    try:
+        startup_matches = await _wc_fetch_matches()
+        now_utc_boot = datetime.now(timezone.utc)
+        skipped = 0
+        for m in startup_matches:
+            post_key = f"{m['id']}_post"
+            pre_key  = f"{m['id']}_pre"
+            # Already finished — mark both pre and post as done
+            if m["status"] == "FINISHED":
+                _wc_scheduled.setdefault(post_key, "fired")
+                _wc_scheduled.setdefault(pre_key,  "fired")
+                _wc_finished_at.setdefault(m["id"], now_utc_boot)
+                skipped += 1
+            # Kicked off already but not finished — pre-match is moot
+            elif m["kickoff"] <= now_utc_boot:
+                _wc_scheduled.setdefault(pre_key, "fired")
+        print(f"⚽ Startup: pre-armed {skipped} already-finished matches (won't fire post-match).")
+    except Exception as e:
+        print(f"⚽ Startup pre-arm error: {e}")
 
     while not bot.is_closed():
         if not WC_SCHEDULER_ENABLED:
@@ -3311,25 +3365,22 @@ async def _wc_scheduler_loop():
             continue
 
         try:
-            matches = await _wc_fetch_matches()
-            now_utc = datetime.now(timezone.utc)
+            matches  = await _wc_fetch_matches()
+            now_utc  = datetime.now(timezone.utc)
 
             for match in matches:
-                mid = match["id"]
-                kickoff: datetime = match["kickoff"]
-                name: str = match["name"]
-                minutes_to_start = (kickoff - now_utc).total_seconds() / 60
+                mid     = match["id"]
+                kickoff = match["kickoff"]      # UTC datetime
+                name    = match["name"]
+                status  = match["status"]       # live status from API
+                minutes_to_start   = (kickoff - now_utc).total_seconds() / 60
                 minutes_since_start = (now_utc - kickoff).total_seconds() / 60
 
-                # ── PRE-MATCH: fire when between 10–16 min before kickoff ──
-                # Wide window (10–16 min) so the 30s loop never misses it
+                # ── PRE-MATCH: fire once, exactly in the 14.5–15.5 min window before kickoff ──
                 pre_key = f"{mid}_pre"
-                if (
-                    10 <= minutes_to_start <= 16
-                    and pre_key not in _wc_scheduled
-                ):
+                if pre_key not in _wc_scheduled and WC_PRE_WINDOW_LOW <= minutes_to_start <= WC_PRE_WINDOW_HIGH:
                     _wc_scheduled[pre_key] = "fired"
-                    print(f"[WC Scheduler] PRE-MATCH sequence for: {name}")
+                    print(f"[WC Scheduler] PRE-MATCH → {name} (kicks off in {minutes_to_start:.1f} min)")
                     asyncio.create_task(
                         _wc_run_sequence(
                             WC_PRE_COMMANDS,
@@ -3338,20 +3389,35 @@ async def _wc_scheduler_loop():
                         )
                     )
 
-                # ── POST-MATCH: fire once match duration has elapsed ──
-                # No status check — openfootball JSON uses STATUS_SCHEDULED for all;
-                # instead just rely on time (120 min after kickoff = safe "match over")
+                # ── POST-MATCH detection ──────────────────────────────────────────────────────
                 post_key = f"{mid}_post"
-                if (
-                    WC_MATCH_DURATION <= minutes_since_start <= WC_MATCH_DURATION + 6
-                    and post_key not in _wc_scheduled
-                ):
+                if post_key in _wc_scheduled:
+                    continue  # already fired
+
+                # 1) API reports FINISHED → start 5-min countdown
+                if status == "FINISHED":
+                    if mid not in _wc_finished_at:
+                        _wc_finished_at[mid] = now_utc
+                        print(f"[WC Scheduler] API says FINISHED for {name}, waiting {WC_POST_DELAY} min…")
+                    elif (now_utc - _wc_finished_at[mid]).total_seconds() / 60 >= WC_POST_DELAY:
+                        _wc_scheduled[post_key] = "fired"
+                        print(f"[WC Scheduler] POST-MATCH (API FINISHED+{WC_POST_DELAY}m) → {name}")
+                        asyncio.create_task(
+                            _wc_run_sequence(
+                                WC_POST_COMMANDS,
+                                f"Post-match — **{name}** has ended!",
+                                channel,
+                            )
+                        )
+
+                # 2) Fallback: if API never updated, fire WC_FALLBACK_MINUTES after kickoff
+                elif minutes_since_start >= WC_FALLBACK_MINUTES:
                     _wc_scheduled[post_key] = "fired"
-                    print(f"[WC Scheduler] POST-MATCH sequence for: {name}")
+                    print(f"[WC Scheduler] POST-MATCH (fallback {WC_FALLBACK_MINUTES}m) → {name}")
                     asyncio.create_task(
                         _wc_run_sequence(
                             WC_POST_COMMANDS,
-                            f"Post-match — **{name}** has ended!",
+                            f"Post-match — **{name}** (fallback timer, API may be stale)",
                             channel,
                         )
                     )
@@ -3360,6 +3426,266 @@ async def _wc_scheduler_loop():
             print(f"[WC Scheduler] Loop error: {e}")
 
         await asyncio.sleep(30)
+
+
+# ==================== WORLD CUP 2026 LIVE SCORE TRACKER ====================
+#
+# When a match goes IN_PLAY the bot posts a score embed in TARGET_CHANNEL_ID.
+# That message is then edited every 60 s with the latest score + minute.
+# When the match reaches FINISHED the embed is given a final ✅ update.
+#
+# New commands:
+#   .wcscore [team]   – fetch current/latest score for a team (or all live)
+#   .wcscores         – list every match live right now
+
+# match_id → discord.Message (the live-score embed we posted)
+_wc_score_messages: dict[str, discord.Message] = {}
+# match_id → last raw score dict we rendered (to skip redundant edits)
+_wc_last_score_render: dict[str, str] = {}
+
+SCORE_UPDATE_INTERVAL = 60   # seconds between live score edits
+
+
+async def _wc_fetch_live_match(match_id: str) -> dict | None:
+    """
+    Fetch a single match's detailed live data from football-data.org.
+    Returns the raw match dict or None on error.
+    """
+    url = f"{_FD_BASE}/matches/{match_id}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_fd_headers(), timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data
+    except Exception:
+        return None
+
+
+def _wc_score_embed(match: dict, raw: dict | None = None) -> discord.Embed:
+    """
+    Build a Discord Embed for a live/finished match.
+    `match` is our cached dict (id, name, kickoff, status).
+    `raw`   is the full API response for the single match (has score, minute, etc.).
+    """
+    status  = raw["status"] if raw else match["status"]
+    home    = raw["homeTeam"]["shortName"] if raw else match["name"].split(" vs ")[0]
+    away    = raw["awayTeam"]["shortName"] if raw else match["name"].split(" vs ")[-1]
+
+    # Score
+    score_home = score_away = "-"
+    minute_str = ""
+    if raw:
+        sc = raw.get("score", {})
+        ft = sc.get("fullTime", {})
+        ht = sc.get("halfTime", {})
+        if ft.get("home") is not None:
+            score_home = str(ft["home"])
+            score_away = str(ft["away"])
+        elif ht.get("home") is not None:
+            score_home = str(ht["home"])
+            score_away = str(ht["away"])
+        minute_str = str(raw.get("minute", ""))
+
+    # Color & title by status
+    if status == "FINISHED":
+        color = discord.Color.dark_green()
+        title = "⚽ Full Time"
+    elif status == "PAUSED":
+        color = discord.Color.orange()
+        title = "⚽ Half Time"
+    elif status == "IN_PLAY":
+        color = discord.Color.green()
+        title = f"⚽ LIVE{f' — {minute_str}′' if minute_str else ''}"
+    else:
+        color = discord.Color.greyple()
+        title = f"⚽ {status.title()}"
+
+    embed = discord.Embed(title=title, color=color)
+    embed.add_field(
+        name=f"🏟️ {home}  vs  {away}",
+        value=f"## {score_home}  –  {score_away}",
+        inline=False,
+    )
+
+    # Goals detail
+    if raw:
+        goals1 = raw.get("goals", []) if False else []   # API v4 doesn't give goal list on match endpoint
+        # Show scorer info if available via bookings/events (not always present on free tier)
+        pass
+
+    nepal_tz   = pytz.timezone("Asia/Kathmandu")
+    kickoff_npt = match["kickoff"].astimezone(nepal_tz).strftime("%b %d, %H:%M NPT")
+    embed.set_footer(text=f"Kickoff: {kickoff_npt} • Updates every {SCORE_UPDATE_INTERVAL}s")
+    return embed
+
+
+async def _wc_live_score_loop():
+    """
+    Background task — runs alongside _wc_scheduler_loop.
+    Posts + keeps editing live-score embeds for every IN_PLAY / PAUSED match.
+    """
+    await bot.wait_until_ready()
+    print("📊 World Cup live-score tracker started.")
+
+    # Wait briefly for the scheduler loop to finish its startup pre-arm first
+    await asyncio.sleep(5)
+
+    while not bot.is_closed():
+        if not WC_SCHEDULER_ENABLED:
+            await asyncio.sleep(SCORE_UPDATE_INTERVAL)
+            continue
+
+        channel = bot.get_channel(TARGET_CHANNEL_ID)
+        if channel is None:
+            await asyncio.sleep(SCORE_UPDATE_INTERVAL)
+            continue
+
+        try:
+            matches = await _wc_fetch_matches()   # uses shared cache
+
+            for match in matches:
+                mid    = match["id"]
+                status = match["status"]
+
+                # Only care about live, half-time, or just-finished matches
+                if status not in ("IN_PLAY", "PAUSED", "FINISHED"):
+                    continue
+
+                # Skip matches that were already finished before this bot session
+                post_key = f"{mid}_post"
+                if _wc_scheduled.get(post_key) == "fired" and mid not in _wc_score_messages:
+                    # pre-armed at startup — never went live during this session
+                    continue
+
+                # Don't update finished matches more than once after they end
+                score_done_key = f"{mid}_score_done"
+                if score_done_key in _wc_scheduled and status == "FINISHED":
+                    continue
+
+                # Fetch fresh single-match detail (real score + minute)
+                raw = await _wc_fetch_live_match(mid)
+                if raw is None:
+                    continue
+
+                embed = _wc_score_embed(match, raw)
+
+                # Build a short fingerprint to avoid spamming identical edits
+                ft    = raw.get("score", {}).get("fullTime", {})
+                ht    = raw.get("score", {}).get("halfTime", {})
+                fingerprint = f"{status}-{ft}-{ht}-{raw.get('minute','')}"
+
+                if mid in _wc_score_messages:
+                    # Edit existing message only if something changed
+                    if _wc_last_score_render.get(mid) != fingerprint:
+                        try:
+                            await _wc_score_messages[mid].edit(embed=embed)
+                            _wc_last_score_render[mid] = fingerprint
+                        except discord.NotFound:
+                            del _wc_score_messages[mid]  # message was deleted, re-post next loop
+                        except Exception:
+                            pass
+                else:
+                    # Post a new score message
+                    home = raw.get("homeTeam", {}).get("shortName", "?")
+                    away = raw.get("awayTeam", {}).get("shortName", "?")
+                    msg  = await channel.send(
+                        content=f"📊 **Live Score — {home} vs {away}**",
+                        embed=embed,
+                    )
+                    _wc_score_messages[mid]       = msg
+                    _wc_last_score_render[mid]    = fingerprint
+                    print(f"[WC Scores] Posted live score embed for {match['name']}")
+
+                # Mark finished matches so we stop updating them
+                if status == "FINISHED":
+                    _wc_scheduled[score_done_key] = "done"
+                    print(f"[WC Scores] Final score posted for {match['name']}")
+
+        except Exception as e:
+            print(f"[WC Scores] Loop error: {e}")
+
+        await asyncio.sleep(SCORE_UPDATE_INTERVAL)
+
+
+# ── Score commands ─────────────────────────────────────────────────────────────
+
+@bot.command(name="wcscores")
+async def wc_scores_cmd(ctx: commands.Context):
+    """Show all currently live World Cup matches and their scores."""
+    global _wc_cache_time
+    _wc_cache_time = 0.0
+    matches = await _wc_fetch_matches()
+    live    = [m for m in matches if m["status"] in ("IN_PLAY", "PAUSED")]
+
+    if not live:
+        # Show the next upcoming match instead
+        now_utc  = datetime.now(timezone.utc)
+        upcoming = sorted([m for m in matches if m["kickoff"] > now_utc], key=lambda m: m["kickoff"])
+        if upcoming:
+            nxt = upcoming[0]
+            nepal_tz = pytz.timezone("Asia/Kathmandu")
+            npt = nxt["kickoff"].astimezone(nepal_tz).strftime("%b %d, %H:%M NPT")
+            mins = int((nxt["kickoff"] - now_utc).total_seconds() / 60)
+            await ctx.reply(f"⚽ No matches live right now.\nNext: **{nxt['name']}** at {npt} (in {mins} min)")
+        else:
+            await ctx.reply("⚽ No live or upcoming World Cup matches found.")
+        return
+
+    embeds = []
+    for match in live:
+        raw = await _wc_fetch_live_match(match["id"])
+        embeds.append(_wc_score_embed(match, raw))
+
+    await ctx.reply(f"🔴 **{len(live)} match(es) live right now:**", embeds=embeds[:10])
+
+
+@bot.command(name="wcscore")
+async def wc_score_cmd(ctx: commands.Context, *, team: str = ""):
+    """Show the live/latest score for a specific team (or all live if no team given)."""
+    global _wc_cache_time
+    _wc_cache_time = 0.0
+    matches = await _wc_fetch_matches()
+    now_utc = datetime.now(timezone.utc)
+
+    if team:
+        # Search by team name (case-insensitive substring)
+        team_lower = team.lower()
+        candidates = [
+            m for m in matches
+            if team_lower in m["name"].lower()
+            and m["status"] not in ("TIMED", "POSTPONED", "CANCELLED")
+        ]
+        # Also check upcoming if nothing active
+        if not candidates:
+            candidates = sorted(
+                [m for m in matches if team_lower in m["name"].lower() and m["kickoff"] > now_utc],
+                key=lambda m: m["kickoff"]
+            )[:1]
+        if not candidates:
+            await ctx.reply(f"❌ Couldn't find a match for **{team}**. Check the spelling.")
+            return
+        match = candidates[0]
+    else:
+        # No team — find a live match or the most recent one
+        live = [m for m in matches if m["status"] in ("IN_PLAY", "PAUSED")]
+        if live:
+            match = live[0]
+        else:
+            recent = sorted(
+                [m for m in matches if m["status"] == "FINISHED"],
+                key=lambda m: m["kickoff"], reverse=True
+            )
+            if recent:
+                match = recent[0]
+            else:
+                await ctx.reply("⚽ No live matches right now. Use `.wcscores` to see upcoming.")
+                return
+
+    raw   = await _wc_fetch_live_match(match["id"])
+    embed = _wc_score_embed(match, raw)
+    await ctx.reply(embed=embed)
 
 
 # ── Admin commands ────────────────────────────────────────────────────────────
@@ -3391,99 +3717,115 @@ async def wc_status(ctx: commands.Context):
     """Show upcoming World Cup matches and scheduler status."""
     status_str = "✅ Enabled" if WC_SCHEDULER_ENABLED else "🛑 Disabled"
 
-    # Force a fresh fetch every time (bypass cache) so status is always live
+    # Force a fresh fetch every time
     global _wc_matches_cache, _wc_cache_time
-    _wc_cache_time = 0.0  # expire cache so we always re-fetch on .wcstatus
+    _wc_cache_time = 0.0
 
-    matches = await _wc_fetch_matches()
-    now_utc = datetime.now(timezone.utc)
+    matches  = await _wc_fetch_matches()
+    now_utc  = datetime.now(timezone.utc)
     nepal_tz = pytz.timezone("Asia/Kathmandu")
 
+    # Show live matches first, then next 4 upcoming
+    live     = [m for m in matches if m["status"] in ("IN_PLAY", "PAUSED")]
     upcoming = sorted(
-        [m for m in matches if m["kickoff"] > now_utc],
+        [m for m in matches if m["kickoff"] > now_utc and m["status"] not in ("IN_PLAY", "PAUSED", "FINISHED")],
         key=lambda m: m["kickoff"]
-    )[:5]
+    )[:4]
+    display  = live + upcoming
 
     embed = discord.Embed(
         title="⚽ World Cup 2026 Auto-Stream Scheduler",
         color=discord.Color.green() if WC_SCHEDULER_ENABLED else discord.Color.red(),
     )
-    embed.add_field(name="Status", value=status_str, inline=False)
-    embed.add_field(name="Matches Loaded", value=f"{len(matches)} total / {len(upcoming)} upcoming", inline=False)
+    embed.add_field(name="Status", value=status_str, inline=True)
+    embed.add_field(name="Data Source", value="football-data.org (live)", inline=True)
+    embed.add_field(
+        name="Matches",
+        value=f"{len(matches)} total • {len(live)} live • {len(upcoming)} upcoming",
+        inline=False,
+    )
 
-    if upcoming:
+    if display:
         lines = []
-        for m in upcoming:
-            local_kick = m["kickoff"].astimezone(nepal_tz)
-            mins_away = int((m["kickoff"] - now_utc).total_seconds() / 60)
-            pre_fired = "✅" if f"{m['id']}_pre" in _wc_scheduled else "⏳"
-            post_fired = "✅" if f"{m['id']}_post" in _wc_scheduled else "⏳"
+        for m in display:
+            local_kick  = m["kickoff"].astimezone(nepal_tz)
+            mins_away   = int((m["kickoff"] - now_utc).total_seconds() / 60)
+            pre_fired   = "✅" if f"{m['id']}_pre"  in _wc_scheduled else "⏳"
+            post_fired  = "✅" if f"{m['id']}_post" in _wc_scheduled else "⏳"
+            live_badge  = f"🔴 **{m['status']}**" if m["status"] in ("IN_PLAY", "PAUSED") else ""
+            fin_at      = _wc_finished_at.get(m["id"])
+            fin_str     = f" (ended {int((now_utc - fin_at).total_seconds()/60)}m ago)" if fin_at else ""
             lines.append(
-                f"**{m['name']}**\n"
-                f"🕐 {local_kick.strftime('%b %d, %H:%M')} NPT (in {mins_away} min)\n"
-                f"Pre: {pre_fired}  Post: {post_fired}"
+                f"**{m['name']}** {live_badge}\n"
+                f"🕐 {local_kick.strftime('%b %d, %H:%M')} NPT"
+                + (f" (in {mins_away} min)" if mins_away > 0 else fin_str)
+                + f"\nPre: {pre_fired}  Post: {post_fired}"
             )
-        embed.add_field(name="Upcoming Matches", value="\n\n".join(lines), inline=False)
+        embed.add_field(name="Live / Upcoming", value="\n\n".join(lines), inline=False)
     else:
-        embed.add_field(
-            name="Upcoming Matches",
-            value="No upcoming matches found.\n⚠️ Run `.wctest` to diagnose the fetch.",
-            inline=False
-        )
+        embed.add_field(name="Upcoming Matches", value="No matches found. Run `.wctest` to diagnose.", inline=False)
 
-    embed.set_footer(text="Pre-match fires 15 min before kickoff • Post-match fires ~120 min after kickoff")
+    embed.set_footer(
+        text=f"Pre fires {WC_PRE_WINDOW_LOW}–{WC_PRE_WINDOW_HIGH} min before kickoff • "
+             f"Post fires {WC_POST_DELAY} min after FINISHED (fallback: {WC_FALLBACK_MINUTES} min)"
+    )
     await ctx.reply(embed=embed)
 
 
 @bot.command(name="wctest")
 async def wc_test(ctx: commands.Context):
-    """Diagnose the World Cup match fetch — shows raw results. (Admins only)"""
+    """Diagnose the World Cup API fetch — shows live status. (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
 
-    await ctx.reply("🔍 Fetching from GitHub...")
-    url = "https://raw.githubusercontent.com/openfootball/world-cup.json/master/2026/worldcup.json"
-    try:
-        import ssl as _ssl
-        _ssl_ctx = _ssl.create_default_context()
-        _ssl_ctx.check_hostname = False
-        _ssl_ctx.verify_mode = _ssl.CERT_NONE
-        connector = aiohttp.TCPConnector(ssl=_ssl_ctx)
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(url, timeout=10) as resp:
-                status_code = resp.status
-                raw = await resp.text()
+    key_set = bool(os.getenv("FOOTBALL_DATA_API_KEY", ""))
+    await ctx.reply(f"🔍 Querying football-data.org… (API key: {'✅ set' if key_set else '❌ missing — add FOOTBALL_DATA_API_KEY to .env'})")
 
+    url = f"{_FD_BASE}/competitions/{_FD_WC_COMPETITION}/matches"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=_fd_headers(), timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                status_code = resp.status
+                data        = await resp.json()
+
+        if status_code == 403:
+            await ctx.reply("❌ **403 Forbidden** — your API key is missing or wrong.\nGet a free key at https://www.football-data.org/client/register")
+            return
         if status_code != 200:
-            await ctx.reply(f"❌ HTTP {status_code}\n```{raw[:300]}```")
+            await ctx.reply(f"❌ HTTP {status_code}: {str(data)[:300]}")
             return
 
-        import json as _json
-        data = _json.loads(raw)
         all_matches = data.get("matches", [])
-        now_utc = datetime.now(timezone.utc)
-        nepal_tz = pytz.timezone("Asia/Kathmandu")
+        now_utc     = datetime.now(timezone.utc)
+        nepal_tz    = pytz.timezone("Asia/Kathmandu")
 
         parsed = []
-        for i, m in enumerate(all_matches):
-            date_str = m.get("date", "")
-            time_str = m.get("time", "")
-            mo = re.match(r'(\d{2}):(\d{2})\s*UTC([+-]\d+)', time_str)
-            if mo:
-                h, mi, off = int(mo[1]), int(mo[2]), int(mo[3])
-                ko = datetime.strptime(date_str, "%Y-%m-%d").replace(
-                    hour=h, minute=mi,
-                    tzinfo=timezone(timedelta(hours=off))
-                ).astimezone(timezone.utc)
-                parsed.append((ko, m.get("team1","?"), m.get("team2","?")))
+        for m in all_matches:
+            try:
+                ko      = datetime.fromisoformat(m["utcDate"].replace("Z", "+00:00"))
+                home    = m.get("homeTeam", {}).get("shortName") or m.get("homeTeam", {}).get("name", "TBD")
+                away    = m.get("awayTeam", {}).get("shortName") or m.get("awayTeam", {}).get("name", "TBD")
+                status  = m.get("status", "?")
+                parsed.append((ko, home, away, status))
+            except Exception:
+                continue
 
-        upcoming = sorted([(ko, t1, t2) for ko, t1, t2 in parsed if ko > now_utc])
-        lines = [f"✅ HTTP {status_code} — {len(all_matches)} matches in JSON, {len(parsed)} parsed, {len(upcoming)} upcoming\n"]
-        for ko, t1, t2 in upcoming[:8]:
-            npt = ko.astimezone(nepal_tz)
+        live     = [(ko, h, a, s) for ko, h, a, s in parsed if s in ("IN_PLAY", "PAUSED")]
+        upcoming = sorted([(ko, h, a, s) for ko, h, a, s in parsed if ko > now_utc and s == "TIMED"])
+        lines    = [f"✅ HTTP {status_code} — {len(all_matches)} matches ({len(live)} live, {len(upcoming)} upcoming)\n"]
+
+        if live:
+            lines.append("**🔴 LIVE NOW:**")
+            for ko, h, a, s in live:
+                lines.append(f"  `{s}` — **{h} vs {a}**")
+            lines.append("")
+
+        lines.append("**⏳ Next 8 upcoming:**")
+        for ko, h, a, s in upcoming[:8]:
+            npt  = ko.astimezone(nepal_tz)
             mins = int((ko - now_utc).total_seconds() / 60)
-            lines.append(f"`{npt.strftime('%b %d %H:%M')} NPT` (+{mins}m) — {t1} vs {t2}")
+            lines.append(f"`{npt.strftime('%b %d %H:%M')} NPT` (+{mins}m) — {h} vs {a}")
 
         await ctx.reply("\n".join(lines))
 
@@ -3499,7 +3841,11 @@ async def wc_reset(ctx: commands.Context):
         return
     _wc_scheduled.clear()
     _wc_matches_cache.clear()
-    await ctx.reply("🔄 World Cup scheduler state reset — all matches re-armed!")
+    _wc_finished_at.clear()
+    _wc_score_messages.clear()
+    _wc_last_score_render.clear()
+    _wc_cache_time = 0.0
+    await ctx.reply("🔄 World Cup scheduler + live scores reset — all matches re-armed!")
 
 
 # ==================== MAIN ====================
