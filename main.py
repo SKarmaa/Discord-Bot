@@ -3279,7 +3279,7 @@ WC_POST_DELAY      = 5               # minutes after FINISHED before firing post
 WC_FALLBACK_MINUTES = 130            # fallback: fire post-match N min after kickoff if API stale
 
 # Pre-match command sequence (15 s gaps between each)
-WC_PRE_COMMANDS  = ["join", "streamstart", "refresh", "clickplay", "resume"]
+WC_PRE_COMMANDS  = ["join", "streamstart", "clickplay"]
 # Post-match command sequence
 WC_POST_COMMANDS = ["resume", "disconnect"]
 
@@ -3778,9 +3778,10 @@ async def wc_score_cmd(ctx: commands.Context, *, team: str = ""):
 @bot.command(name="streamgo")
 async def stream_go(ctx: commands.Context):
     """Manually run the full stream-start sequence. (Admins only)
-    Sequence: join → streamstart → refresh → clickplay → resume
-    Each step has a 15-second gap. The clickplay step polls for the
-    /en/live_events/ button for up to 30 seconds before continuing.
+    Sequence: join → streamstart → clickplay
+    Each step has a 15-second gap. The clickplay step navigates the
+    current Edge tab to watchdgo.com/en, closes any other tabs, and polls
+    for the /en/live_events/ button for up to 30 seconds before clicking it.
     """
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
