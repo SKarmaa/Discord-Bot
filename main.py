@@ -2870,10 +2870,18 @@ async def _get_hwnd_or_fail(ctx: commands.Context, title: str) -> int | None:
 # The bot runs a tiny HTTP server on localhost:9876.
 # An AutoHotkey script on your laptop polls it and clicks the Screen button.
 # Setup: run the .ahk file (see instructions) alongside the bot.
+#
+# IMPORTANT: AHK only confirms "done" once it has ACTUALLY FINISHED running the
+# command (not just when it picked it up). Each command gets a unique id so the
+# bot knows precisely which command's completion it's waiting for, even if a
+# slow command (like clickplay, which can take up to ~30s) is still running
+# when the next command is queued.
 
 from aiohttp import web as _web
 
-_ahk_command: str = ""          # current pending command for AHK to pick up
+_ahk_command: str = ""          # current pending command for AHK to pick up (format: "id|cmd")
+_ahk_command_id: int = 0        # increments per command sent
+_ahk_done_id: str = ""          # id of the most recently completed command, set by AHK
 _ahk_app: _web.Application | None = None
 _ahk_runner: _web.AppRunner | None = None
 
@@ -2894,7 +2902,10 @@ async def _start_ahk_server():
 
 
 async def _ahk_get_command(request: _web.Request) -> _web.Response:
-    """AHK polls this — returns the pending command and clears it."""
+    """AHK polls this — returns the pending command (with its id) and clears it.
+    NOTE: clearing here only means AHK has *picked up* the command, not that
+    it has finished running it. Completion is signaled separately via /done.
+    """
     global _ahk_command
     cmd = _ahk_command
     _ahk_command = ""
@@ -2902,19 +2913,42 @@ async def _ahk_get_command(request: _web.Request) -> _web.Response:
 
 
 async def _ahk_done(request: _web.Request) -> _web.Response:
+    """AHK calls this AFTER it has finished executing a command, passing the
+    command's id back as the request body (or ?id= query param) so the bot
+    knows exactly which in-flight command just completed.
+    """
+    global _ahk_done_id
+    try:
+        body = (await request.text()).strip()
+    except Exception:
+        body = ""
+    done_id = request.query.get("id", "") or body
+    if done_id:
+        _ahk_done_id = done_id
     return _web.Response(text="ok")
 
 
 async def _send_ahk_command(cmd: str, timeout: float = 5.0) -> tuple[bool, str]:
-    """Set the pending command and wait up to `timeout` seconds for AHK to pick it up."""
-    global _ahk_command
-    _ahk_command = cmd
+    """Queue a command for AHK and wait until AHK reports it has FINISHED
+    executing that exact command (matched by id) — not merely picked it up.
+    `timeout` should be long enough to cover the slowest possible runtime of
+    `cmd` (e.g. clickplay needs ~35s, simple keystrokes need only a few s).
+    """
+    global _ahk_command, _ahk_command_id, _ahk_done_id
+    _ahk_command_id += 1
+    this_id = str(_ahk_command_id)
+    _ahk_command = f"{this_id}|{cmd}"
+
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         await asyncio.sleep(0.2)
-        if _ahk_command == "":   # AHK picked it up
+        if _ahk_done_id == this_id:
             return True, "OK"
-    _ahk_command = ""
+    # Timed out — clear the pending command so a stale entry doesn't leak
+    # into a future poll, but leave _ahk_done_id alone in case AHK is just
+    # about to report completion late.
+    if _ahk_command == f"{this_id}|{cmd}":
+        _ahk_command = ""
     return False, "AHK script did not respond in time. Is the .ahk file running?"
 
 
@@ -3166,6 +3200,21 @@ async def disconnect_vc(ctx: commands.Context):
     else:
         await ctx.reply(f"❌ {msg}")
 
+@bot.command(name="clickplay")
+async def click_play(ctx: commands.Context):
+    """Open watchdgo.com/en and click the /en/live Play button. (Admins only)
+    Polls for up to ~30s since the site's button appears intermittently."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await ctx.reply("🔎 **Looking for the Play button on watchdgo…** (up to 30s)")
+    ok, msg = await _send_ahk_command("clickplay", timeout=40.0)
+    if ok:
+        await ctx.reply("✅ **Play button clicked!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
 @bot.command(name="resume")
 async def resume_dgo(ctx: commands.Context):
     """Click the Resume button on the DGO page in Edge. (Admins only)"""
@@ -3325,10 +3374,18 @@ async def _wc_fetch_matches() -> list[dict]:
 
 
 async def _wc_run_sequence(commands: list[str], label: str, channel: discord.TextChannel):
-    """Send a sequence of AHK commands with 15-second gaps, posting status in channel."""
+    """Send a sequence of AHK commands with 15-second gaps, posting status in channel.
+    Most commands are quick keystrokes (8s timeout is plenty), but clickplay
+    opens a browser + polls the page for up to ~30s, so it needs a much
+    longer timeout or it will be wrongly reported as failed mid-run.
+    """
+    AHK_CMD_TIMEOUTS = {
+        "clickplay": 40.0,   # browser open + DevTools poll loop (~30s) + buffer
+    }
     await channel.send(f"⚽ **World Cup Auto-Scheduler** › {label} — starting sequence…")
     for i, cmd in enumerate(commands):
-        ok, msg = await _send_ahk_command(cmd, timeout=8.0)
+        cmd_timeout = AHK_CMD_TIMEOUTS.get(cmd, 8.0)
+        ok, msg = await _send_ahk_command(cmd, timeout=cmd_timeout)
         emoji = "✅" if ok else "❌"
         await channel.send(f"{emoji} `.{cmd}` {'done' if ok else f'failed: {msg}'}")
         if i < len(commands) - 1:
@@ -3716,7 +3773,6 @@ async def wc_score_cmd(ctx: commands.Context, *, team: str = ""):
         )
     else:
         await ctx.reply("⚽ No World Cup matches found. Try `.wctest` to check the API.")
-
 
 
 @bot.command(name="streamgo")
