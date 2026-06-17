@@ -3202,7 +3202,7 @@ async def disconnect_vc(ctx: commands.Context):
 
 @bot.command(name="clickplay")
 async def click_play(ctx: commands.Context):
-    """Open watchdgo.com/en and click the /en/live Play button. (Admins only)
+    """Open watchdgo.com/en and click the /en/live_events/ Play button. (Admins only)
     Polls for up to ~30s since the site's button appears intermittently."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
@@ -3780,7 +3780,7 @@ async def stream_go(ctx: commands.Context):
     """Manually run the full stream-start sequence. (Admins only)
     Sequence: join → streamstart → refresh → clickplay → resume
     Each step has a 15-second gap. The clickplay step polls for the
-    /en/live button for up to 30 seconds before continuing.
+    /en/live_events/ button for up to 30 seconds before continuing.
     """
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
