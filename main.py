@@ -3206,18 +3206,25 @@ async def click_play(ctx: commands.Context):
     Polls for up to ~30s since the site's button appears intermittently.
     Note: this force-closes and reopens Edge to guarantee a single clean
     tab, which drops any active Discord screen share — so a streamstart
-    is re-fired afterward to re-share the new window."""
+    is re-fired afterward to re-share the new window, followed by
+    fullscreen to maximize the view."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
     await ctx.reply("🔎 **Looking for the Play button on watchdgo…** (up to 30s)")
-    ok, msg = await _send_ahk_command("clickplay", timeout=40.0)
+    ok, msg = await _send_ahk_command("clickplay", timeout=55.0)
     if ok:
         await ctx.reply("✅ **Play button clicked!**")
         await asyncio.sleep(2)
         ok2, msg2 = await _send_ahk_command("streamstart", timeout=8.0)
         if ok2:
             await ctx.reply("🔁 **Re-shared the window!**")
+            await asyncio.sleep(2)
+            ok3, msg3 = await _send_ahk_command("fullscreen", timeout=8.0)
+            if ok3:
+                await ctx.reply("🔲 **Fullscreen toggled!**")
+            else:
+                await ctx.reply(f"❌ Failed to fullscreen: {msg3}")
         else:
             await ctx.reply(f"❌ Failed to re-share: {msg2}")
     else:
@@ -3303,7 +3310,7 @@ WC_POST_DELAY      = 5               # minutes after FINISHED before firing post
 WC_FALLBACK_MINUTES = 130            # fallback: fire post-match N min after kickoff if API stale
 
 # Pre-match command sequence (15 s gaps between each)
-WC_PRE_COMMANDS  = ["join", "streamstart", "clickplay"]
+WC_PRE_COMMANDS  = ["join", "clickplay", "streamstart", "fullscreen"]
 # Post-match command sequence
 WC_POST_COMMANDS = ["resume", "closeedge", "disconnect"]
 
@@ -3402,15 +3409,11 @@ async def _wc_run_sequence(commands: list[str], label: str, channel: discord.Tex
     Most commands are quick keystrokes (8s timeout is plenty), but clickplay
     opens a browser + polls the page for up to ~30s, so it needs a much
     longer timeout or it will be wrongly reported as failed mid-run.
-
-    clickplay force-closes Edge before reopening it (the only reliable way
-    to guarantee a single clean tab), which drops the Discord screen share
-    along with the old window. So a follow-up streamstart is fired right
-    after clickplay completes to re-share the freshly opened window —
-    callers don't need to add a second streamstart to their command list.
     """
     AHK_CMD_TIMEOUTS = {
-        "clickplay": 40.0,   # browser open + DevTools poll loop (~30s) + buffer
+        "clickplay": 55.0,   # worst case: Edge kill+wait (~5.5s) + relaunch wait
+                              # (~5s) + window activate (~5.5s) + JS setup (~1.3s)
+                              # + 30s poll loop + buffer ≈ 50s actual, +5s margin
         "closeedge": 10.0,   # kill + wait-for-exit loop (~5.5s) + buffer
     }
     await channel.send(f"⚽ **World Cup Auto-Scheduler** › {label} — starting sequence…")
@@ -3419,14 +3422,6 @@ async def _wc_run_sequence(commands: list[str], label: str, channel: discord.Tex
         ok, msg = await _send_ahk_command(cmd, timeout=cmd_timeout)
         emoji = "✅" if ok else "❌"
         await channel.send(f"{emoji} `.{cmd}` {'done' if ok else f'failed: {msg}'}")
-
-        if cmd == "clickplay" and ok:
-            # Edge was just killed + reopened — re-share the new window.
-            await asyncio.sleep(2)
-            ok2, msg2 = await _send_ahk_command("streamstart", timeout=8.0)
-            emoji2 = "✅" if ok2 else "❌"
-            await channel.send(f"{emoji2} `.streamstart` (re-share after clickplay) {'done' if ok2 else f'failed: {msg2}'}")
-
         if i < len(commands) - 1:
             await asyncio.sleep(15)
     await channel.send("✅ **Sequence complete!**")
@@ -3817,12 +3812,12 @@ async def wc_score_cmd(ctx: commands.Context, *, team: str = ""):
 @bot.command(name="streamgo")
 async def stream_go(ctx: commands.Context):
     """Manually run the full stream-start sequence. (Admins only)
-    Sequence: join → streamstart → clickplay → (auto re-fired) streamstart
+    Sequence: join → clickplay → streamstart → fullscreen
     Each step has a 15-second gap. The clickplay step force-closes and
     reopens Edge to guarantee a single clean tab on watchdgo.com/en, then
     polls for the /en/live_events/ button for up to 30 seconds and clicks
-    it. Since closing Edge drops the screen share, streamstart is fired
-    again automatically right after clickplay to re-share the new window.
+    it. streamstart then shares the freshly opened window, and fullscreen
+    maximizes the view.
     """
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
