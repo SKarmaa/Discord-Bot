@@ -3230,7 +3230,7 @@ WC_POST_DELAY      = 5               # minutes after FINISHED before firing post
 WC_FALLBACK_MINUTES = 130            # fallback: fire post-match N min after kickoff if API stale
 
 # Pre-match command sequence (15 s gaps between each)
-WC_PRE_COMMANDS  = ["join", "streamstart", "refresh", "resume"]
+WC_PRE_COMMANDS  = ["join", "streamstart", "refresh", "clickplay", "resume"]
 # Post-match command sequence
 WC_POST_COMMANDS = ["resume", "disconnect"]
 
@@ -3716,6 +3716,20 @@ async def wc_score_cmd(ctx: commands.Context, *, team: str = ""):
         )
     else:
         await ctx.reply("⚽ No World Cup matches found. Try `.wctest` to check the API.")
+
+
+
+@bot.command(name="streamgo")
+async def stream_go(ctx: commands.Context):
+    """Manually run the full stream-start sequence. (Admins only)
+    Sequence: join → streamstart → refresh → clickplay → resume
+    Each step has a 15-second gap. The clickplay step polls for the
+    /en/live button for up to 30 seconds before continuing.
+    """
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await _wc_run_sequence(WC_PRE_COMMANDS, "Manual Stream Start", ctx.channel)
 
 
 # ── Admin commands ────────────────────────────────────────────────────────────
