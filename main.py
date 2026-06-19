@@ -3830,6 +3830,21 @@ async def stream_go(ctx: commands.Context):
     await _wc_run_sequence(WC_PRE_COMMANDS, "Manual Stream Start", ctx.channel)
 
 
+@bot.command(name="streamend")
+async def stream_end(ctx: commands.Context):
+    """Manually run the full stream-end sequence. (Admins only)
+    Sequence: resume → closeedge → disconnect
+    Each step has a 15-second gap. The closeedge step force-closes Edge
+    (dropping any active Discord screen share) then reopens a fresh blank
+    Edge window — Edge staying closed too long makes Discord stop
+    recognizing it as an active "game". disconnect then leaves the VC.
+    """
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await _wc_run_sequence(WC_POST_COMMANDS, "Manual Stream End", ctx.channel)
+
+
 # ── Admin commands ────────────────────────────────────────────────────────────
 
 @bot.command(name="wcenable")
