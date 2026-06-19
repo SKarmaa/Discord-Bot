@@ -3233,13 +3233,17 @@ async def click_play(ctx: commands.Context):
 
 @bot.command(name="closeedge")
 async def close_edge(ctx: commands.Context):
-    """Force-close the Edge browser window. (Admins only)
-    Used at the end of a stream to clean up — does not reopen Edge
-    afterward. This also drops any active Discord screen share."""
+    """Force-close the Edge browser window, then reopen a fresh blank
+    window. (Admins only)
+    Used at the end of a stream to clean up the old tab/state. Edge is
+    reopened (without watchdgo) so it stays open between matches —
+    leaving it closed too long makes Discord stop recognizing it as an
+    active "game", forcing a manual re-add. This also drops any active
+    Discord screen share."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    ok, msg = await _send_ahk_command("closeedge", timeout=10.0)
+    ok, msg = await _send_ahk_command("closeedge", timeout=15.0)
     if ok:
         await ctx.reply("🗑️ **Edge closed!**")
     else:
@@ -3414,7 +3418,8 @@ async def _wc_run_sequence(commands: list[str], label: str, channel: discord.Tex
         "clickplay": 55.0,   # worst case: Edge kill+wait (~5.5s) + relaunch wait
                               # (~5s) + window activate (~5.5s) + JS setup (~1.3s)
                               # + 30s poll loop + buffer ≈ 50s actual, +5s margin
-        "closeedge": 10.0,   # kill + wait-for-exit loop (~5.5s) + buffer
+        "closeedge": 15.0,   # kill + wait-for-exit (~5.5s) + relaunch wait (~3s)
+                              # + window activate (~5s) + buffer
     }
     await channel.send(f"⚽ **World Cup Auto-Scheduler** › {label} — starting sequence…")
     for i, cmd in enumerate(commands):
