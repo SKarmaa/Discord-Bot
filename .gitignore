@@ -121,5 +121,5 @@ Thumbs.db
 logs/
 
 # Bot specific files (optional - uncomment if you want to ignore)
-bot_data.json
+# bot_data.json
 # *.json
