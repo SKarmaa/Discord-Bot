@@ -15,7 +15,7 @@
   "trigger_word_responses": true,
   "random_reactions": true,
   "giveaway_everyone_ping": true,
-  "admin_broadcast_everyone_ping": false,
+  "admin_broadcast_everyone_ping": true,
   "ai_trigger_phrase": "oh kp baa",
   "ai_cooldown_minutes": 15,
   "special_admin_id": 783619741289414676,
