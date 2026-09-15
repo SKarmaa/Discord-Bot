@@ -1,6 +1,6 @@
 {
   "ai_chat": true,
-  "ai_provider": "gemini",
+  "ai_provider": "agentai",
   "agentai_model": "gemini-2.5-flash-lite",
   "ai_moderation_commands": true,
   "moderation": true,
