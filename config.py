@@ -79,6 +79,17 @@ DEFAULT_FEATURES = {
     "special_admin_id": 783619741289414676,
     "target_channel_id": 762775973816696863,
     "command_prefix": ".",
+    
+    # ── /update, .update (git pull + restart) ──
+    "deploy_repo_path": ".",
+    "deploy_git_remote": "origin",
+    "deploy_git_branch": "main",
+    # "exit" (default) = clean exit, let a supervisor (NSSM, systemd, pm2,
+    # Docker) restart it. "exec" = self re-exec in place — only for setups
+    # with NO supervisor (do NOT use under NSSM, see cogs/deploy.py).
+    # "reload" = hot-reload the code into the running process, no restart
+    # at all (see core/hot_reload.py for exactly what it can/can't cover).
+    "deploy_restart_method": "exit",
 }
 
 

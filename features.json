@@ -22,5 +22,9 @@
   "ai_cooldown_minutes": 15,
   "special_admin_id": 783619741289414676,
   "target_channel_id": 762775973816696863,
-  "command_prefix": "."
+  "command_prefix": ".",
+  "deploy_repo_path": "C:/Users/shopn/Desktop/Discord-Bot",
+  "deploy_git_remote": "origin",
+  "deploy_git_branch": "main",
+  "deploy_restart_method": "exit"
 }

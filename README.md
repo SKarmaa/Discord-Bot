@@ -55,7 +55,7 @@ Every major area can be switched off without touching code:
 
 | Key | Default | What it gates |
 |---|---|---|
-| `ai_chat` | true | `/ai`, `/aistatus`, the "oh kp baa" trigger |
+| `ai_chat` | true | `/ai`, `/aistatus`, the "oh kp baa" trigger, and @mentioning the bot |
 | `ai_moderation_commands` | true | natural-language kick/ban/mute via the AI trigger |
 | `moderation` | true | kick/ban/mute/unmute/lock/unlock/purge/slowmode/massmove |
 | `fun_games` | true | poll/8ball/coinflip/trivia/wyr/truth/dare/rps |
@@ -65,6 +65,7 @@ Every major area can be switched off without touching code:
 | `confessions` | true | `/confess` |
 | `giveaways` | true | `/giveaway` and friends |
 | `admin_broadcast` | true | `/kpwrite`, `/kpannounce` |
+| `deploy` | **false** | `/update`, `.update` — `git pull` + self-restart (see below) |
 | `pc_control` | **false** | AutoHotkey/PC remote-control commands (Windows-only, needs a local AHK script) |
 | `worldcup_tracker` | **false** | World Cup auto-stream scheduler + live scores (needs `FOOTBALL_DATA_API_KEY`) |
 | `welcome_messages` | true | posting a welcome message on member join |
@@ -135,6 +136,52 @@ non-whitelisted links and Discord invite links.
 Both layers are independent on purpose — if one is ever misconfigured or a
 future command forgets to call the text-scrubbing helper, the global
 `allowed_mentions` default still holds the line.
+
+## `/update` and `.update` — git pull + apply changes
+
+Disabled by default (`features.json -> "deploy": false`). Once enabled, an
+admin can run `/update` or `.update` to run `git pull --ff-only <remote>
+<branch>` in `deploy_repo_path` (`--ff-only` fails loudly instead of
+creating a merge commit if the branches have diverged — safer for an
+unattended trigger), post the output back to the channel, and then apply
+the change one of three ways, controlled by `deploy_restart_method`:
+
+| Value | What happens | Use when |
+|---|---|---|
+| `"exit"` (default) | Closes the Discord connection, exits cleanly | You run under a supervisor — **NSSM**, systemd (`Restart=always`), pm2, Docker (`--restart`). NSSM restarts its managed app on exit by default. |
+| `"exec"` | Re-execs the same process in place (`os.execv`) | You run it directly (`python main.py` in a terminal/tmux), with **no** supervisor. **Do not use this under NSSM** — Windows has no true `exec()`, so this spawns a brand-new process with a new PID while the old one exits; NSSM would restart the service *on top of* that, leaving two bot instances running on the same token. |
+| `"reload"` | Hot-reloads changed `cogs/*.py` and most of `core/*.py` straight into the running process — **no restart at all** | You want zero-downtime updates for ordinary command/logic changes and are OK with its limits (see below). |
+
+**`"reload"` limits** (full explanation in `core/hot_reload.py`):
+- Can't reload `core/state.py` (would wipe live giveaways/AFK/snipe/reminder
+  data) — it's skipped on purpose, your live state is safe.
+- Can't reload `bot_instance.py`, `main.py`, or code changes to `config.py`
+  itself (its *data* — `bot_data.json`/`features.json` — is still reloaded)
+  — those need a real restart (`"exit"` or `"exec"`).
+- Can't pick up a new `pip install` dependency — needs a fresh interpreter.
+- If a reload step fails partway through, it stops immediately and tells
+  you so rather than leaving a silent mixed old/new state — switch to
+  `"exit"` and run `/update` again to get a clean restart.
+- Resets per-user AI cooldowns (the rate limiter object is recreated).
+
+Configurable in `features.json`:
+
+```json
+"deploy_repo_path": ".",
+"deploy_git_remote": "origin",
+"deploy_git_branch": "main",
+"deploy_restart_method": "exit"
+```
+
+Permission is the same as other admin commands (`is_admin_user()` — the
+special admin ID or server Administrator). Since this command can make the
+bot run whatever code is on that branch, tighten that check in
+`cogs/deploy.py` if you want it restricted to only the special admin ID.
+
+**Before enabling it:** make sure `bot_data.json`, `features.json`,
+`giveaways.json`, and `.env` are NOT committed to the git repo (see the
+included `.gitignore`) — otherwise `git pull` can conflict with, or
+overwrite, your live runtime data.
 
 ## Notes / things worth knowing
 
