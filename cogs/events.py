@@ -165,10 +165,10 @@ async def on_message(message):
                 runtime = get_agentai_v2_runtime()
                 agent_response = await runtime.run(prompt, enable_tools=True)
                 raw_response = agent_response.content
-                if agent_response.tool_calls:
-                    tool_names = [tc.tool_name for tc in agent_response.tool_calls if tc.status == ToolCallStatus.SUCCESS]
-                    if tool_names:
-                        raw_response += "\n\n🔧 *Used tools: " + ", ".join(tool_names) + "*"
+                # if agent_response.tool_calls:
+                #     tool_names = [tc.tool_name for tc in agent_response.tool_calls if tc.status == ToolCallStatus.SUCCESS]
+                #     if tool_names:
+                #         raw_response += "\n\n🔧 *Used tools: " + ", ".join(tool_names) + "*"
             else:
                 raw_response = await query_gemini_api(prompt)
             response = sanitize_ai_response(raw_response)
