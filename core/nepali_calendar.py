@@ -1,5 +1,9 @@
-"""core/nepali_calendar.py — Nepali (Bikram Sambat) festival calendar data/helpers."""
-from datetime import timedelta
+"""core/nepali_calendar.py — Nepali (Bikram Sambat) festival calendar data/helpers.
+
+Festival and month data is loaded from data/nepali_festivals.json via
+core.data_loader so it can be edited without touching Python code.
+"""
+from datetime import datetime, timedelta
 
 import pytz
 
@@ -11,63 +15,58 @@ except ImportError as e:
     print(f"nepali-datetime import error: {e}")
     NEPALI_DATETIME_AVAILABLE = False
 
-from datetime import datetime
+from core.data_loader import get_data
 
-NEPALI_FESTIVALS = {
-    (1, 1):   "🎉 Nepali New Year (Naya Barsha)!",
-    (1, 15):  "🌸 Ubhauli Parwa",
-    (3, 15):  "🌧️ Sithi Nakha",
-    (5, 29):  "🐍 Nag Panchami",
-    (5, 30):  "💫 Janai Purnima / Rakshya Bandhan",
-    (6, 2):   "🐮 Gaijatra",
-    (6, 12):  "🎭 Indra Jatra",
-    (6, 18):  "🙏 Haritalika Teej",
-    (6, 21):  "🌿 Rishi Panchami",
-    (7, 1):   "💡 Ghatasthapana (Dashain begins)",
-    (7, 8):   "🌺 Maha Ashtami",
-    (7, 9):   "🐃 Maha Navami",
-    (7, 10):  "🎊 Bijaya Dashami (Dashain)!",
-    (7, 15):  "🌕 Kojagrat Purnima",
-    (7, 29):  "🪔 Tihar begins – Kaag Tihar",
-    (7, 30):  "🐕 Kukur Tihar",
-    (8, 1):   "🐮 Gai Tihar & Laxmi Puja",
-    (8, 2):   "🎆 Mha Puja & Gobardhan Puja",
-    (8, 3):   "👫 Bhai Tika (Tihar ends)!",
-    (8, 16):  "🌕 Chhath Parwa begins",
-    (9, 1):   "❄️ Udhauli Parwa",
-    (10, 1):  "🎋 Maghe Sankranti",
-    (10, 15): "🎵 Sonam Lhosar",
-    (11, 6):  "🌺 Maha Shivaratri",
-    (11, 15): "🌸 Gyalpo Lhosar",
-    (12, 15): "🌈 Fagu Purnima (Holi)!",
-    (12, 30): "🎊 Ghode Jatra",
-}
 
-NEPALI_MONTHS = [
-    "Baisakh", "Jestha", "Ashadh", "Shrawan",
-    "Bhadra", "Ashwin", "Kartik", "Mangsir",
-    "Poush", "Magh", "Falgun", "Chaitra"
-]
+def _festivals_map() -> dict:
+    """Return the (month, day) → name mapping, converting JSON string keys
+    like ``"7-10"`` to tuple keys ``(7, 10)`` on the fly."""
+    raw = get_data("nepali_festivals").get("festivals", {})
+    result = {}
+    for key, name in raw.items():
+        parts = key.split("-")
+        if len(parts) == 2:
+            try:
+                result[(int(parts[0]), int(parts[1]))] = name
+            except ValueError:
+                continue
+    return result
+
+
+def _months_list() -> list:
+    """Return the list of Nepali month names."""
+    return get_data("nepali_festivals").get("months", [])
+
+
+# Keep module-level aliases for any code that imports these directly
+# (lazily computed on first access via the functions above).
+NEPALI_FESTIVALS = property(lambda self: _festivals_map())
+NEPALI_MONTHS = property(lambda self: _months_list())
 
 
 def get_upcoming_nepali_festivals(days_ahead: int = 30) -> list:
     """Return upcoming festivals within the next N days."""
     if not NEPALI_DATETIME_AVAILABLE:
         return []
+
+    festivals = _festivals_map()
+    months = _months_list()
     upcoming = []
     nepal_tz = pytz.timezone('Asia/Kathmandu')
     now = datetime.now(nepal_tz)
+
     for i in range(days_ahead):
         future_date = now + timedelta(days=i)
         try:
             nepali_d = nepali_datetime.date.from_datetime_date(future_date.date())
             key = (nepali_d.month, nepali_d.day)
-            if key in NEPALI_FESTIVALS:
+            if key in festivals:
+                month_name = months[nepali_d.month - 1] if nepali_d.month <= len(months) else "?"
                 upcoming.append({
                     "days_away": i,
-                    "bs_date": f"{NEPALI_MONTHS[nepali_d.month - 1]} {nepali_d.day}",
+                    "bs_date": f"{month_name} {nepali_d.day}",
                     "ad_date": future_date.strftime("%b %d"),
-                    "name": NEPALI_FESTIVALS[key]
+                    "name": festivals[key]
                 })
         except Exception:
             continue

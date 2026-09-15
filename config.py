@@ -45,6 +45,8 @@ FEATURES: dict = {}        # features.json — toggles + tunables
 DEFAULT_FEATURES = {
     # ── feature area toggles ──
     "ai_chat": True,                    # /ai, /aistatus, "oh kp baa" trigger
+    "ai_provider": "gemini",            # "gemini" or "agentai" — toggleable AI backend
+    "agentai_model": "gemini-2.5-flash-lite",  # model used when ai_provider="agentai"
     "ai_moderation_commands": True,     # natural-language kick/ban/mute via AI trigger
     "moderation": True,                 # kick/ban/mute/unmute/lock/unlock/purge/slowmode/massmove
     "fun_games": True,                  # 8ball/coinflip/trivia/wyr/truth/dare/rps/poll
@@ -185,6 +187,9 @@ def reload_all():
     CONFIG.update(BOT_DATA.get("bot_config", {}))
     TRIGGER_WORDS[:] = list(WITTY_RESPONSES.keys())
     _load_features()
+    # Reload JSON data files (data/*.json) so edits take effect
+    from core.data_loader import reload_data
+    reload_data()
 
 
 # Backwards-compatible aliases (old code called these names)

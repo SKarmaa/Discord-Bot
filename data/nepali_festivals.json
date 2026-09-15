@@ -1,0 +1,37 @@
+{
+  "festivals": {
+    "1-1":   "🎉 Nepali New Year (Naya Barsha)!",
+    "1-15":  "🌸 Ubhauli Parwa",
+    "3-15":  "🌧️ Sithi Nakha",
+    "5-29":  "🐍 Nag Panchami",
+    "5-30":  "💫 Janai Purnima / Rakshya Bandhan",
+    "6-2":   "🐮 Gaijatra",
+    "6-12":  "🎭 Indra Jatra",
+    "6-18":  "🙏 Haritalika Teej",
+    "6-21":  "🌿 Rishi Panchami",
+    "7-1":   "💡 Ghatasthapana (Dashain begins)",
+    "7-8":   "🌺 Maha Ashtami",
+    "7-9":   "🐃 Maha Navami",
+    "7-10":  "🎊 Bijaya Dashami (Dashain)!",
+    "7-15":  "🌕 Kojagrat Purnima",
+    "7-29":  "🪔 Tihar begins – Kaag Tihar",
+    "7-30":  "🐕 Kukur Tihar",
+    "8-1":   "🐮 Gai Tihar & Laxmi Puja",
+    "8-2":   "🎆 Mha Puja & Gobardhan Puja",
+    "8-3":   "👫 Bhai Tika (Tihar ends)!",
+    "8-16":  "🌕 Chhath Parwa begins",
+    "9-1":   "❄️ Udhauli Parwa",
+    "10-1":  "🎋 Maghe Sankranti",
+    "10-15": "🎵 Sonam Lhosar",
+    "11-6":  "🌺 Maha Shivaratri",
+    "11-15": "🌸 Gyalpo Lhosar",
+    "12-15": "🌈 Fagu Purnima (Holi)!",
+    "12-30": "🎊 Ghode Jatra"
+  },
+
+  "months": [
+    "Baisakh", "Jestha", "Ashadh", "Shrawan",
+    "Bhadra", "Ashwin", "Kartik", "Mangsir",
+    "Poush", "Magh", "Falgun", "Chaitra"
+  ]
+}
