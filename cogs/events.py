@@ -16,7 +16,8 @@ import discord
 
 from bot_instance import bot
 from config import CONFIG, FEATURES, TRIGGER_WORDS, WELCOME_MESSAGES, WITTY_RESPONSES
-from core.ai_client import ai_rate_limiter, query_gemini_api
+from core.ai_client import ai_rate_limiter
+from core.agentai_runtime import get_agentai_runtime
 from core.mention_safety import is_prompt_safe, neutralize_mentions, sanitize_ai_response
 from core.permissions import is_admin_user
 from core.state import snipe_store
@@ -158,8 +159,19 @@ async def on_message(message):
         if not is_admin:
             ai_rate_limiter.record_query(user_id)
         async with message.channel.typing():
-            raw_response = await query_gemini_api(prompt)
-            response = sanitize_ai_response(raw_response)
+            # Use the new AgentAI runtime
+            runtime = get_agentai_runtime()
+            agent_response = await runtime.run(prompt, enable_tools=True)
+            
+            # Sanitize the response
+            response = sanitize_ai_response(agent_response.content)
+            
+            # Add tool call info if tools were used
+            if agent_response.tool_calls:
+                tool_info = "\n\n🔧 *Used tools: " + ", ".join([tc.tool_name for tc in agent_response.tool_calls]) + "*"
+                response += tool_info
+            
+            # Handle long responses
             if len(response) > 2000:
                 chunks = [response[i:i + 1990] for i in range(0, len(response), 1990)]
                 for i, chunk in enumerate(chunks):
