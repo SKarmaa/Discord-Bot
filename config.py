@@ -81,6 +81,7 @@ DEFAULT_FEATURES = {
     "command_prefix": ".",
     
     # ── /update, .update (git pull + restart) ──
+    "deploy": True,  # whether the bot allows /update/.update commands at all
     "deploy_repo_path": ".",
     "deploy_git_remote": "origin",
     "deploy_git_branch": "main",

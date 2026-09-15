@@ -21,6 +21,7 @@ from cogs import (  # noqa: F401
     confession,
     giveaway,
     admin_broadcast,
+    deploy,
     pc_control,
     worldcup,
 )
