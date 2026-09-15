@@ -103,7 +103,7 @@ async def on_message(message):
     ai_trigger_phrase = FEATURES.get("ai_trigger_phrase", "oh kp baa")
     ai_cooldown_minutes = FEATURES.get("ai_cooldown_minutes", 15)
 
-    # Two ways to trigger the AI: the trigger phrase, or @-mentioning the bot.
+    # Two ways to trigger the AI: the trigger phrase, or @-mentioning the bot, or replying to it.
     # `message.mention_everyone` is excluded so an @everyone/@here ping (which
     # technically "mentions" every member, including the bot) never fires this.
     phrase_triggered = content_lower.startswith(ai_trigger_phrase.lower())
@@ -112,8 +112,13 @@ async def on_message(message):
         and bot.user in message.mentions
         and not message.mention_everyone
     )
+    
+    reply_triggered = False
+    if message.reference and message.reference.cached_message:
+        if message.reference.cached_message.author == bot.user:
+            reply_triggered = True
 
-    if FEATURES.get("ai_chat", True) and (phrase_triggered or mention_triggered):
+    if FEATURES.get("ai_chat", True) and (phrase_triggered or mention_triggered or reply_triggered):
         user_id = message.author.id
         is_admin = is_admin_user(message.author)
 
@@ -141,6 +146,12 @@ async def on_message(message):
             # collapse extra whitespace left behind.
             prompt = re.sub(rf'<@!?{bot.user.id}>', '', message.content).strip()
             prompt = re.sub(r'\s+', ' ', prompt).strip()
+            
+        # Append context if replying to the bot
+        if (mention_triggered or reply_triggered) and message.reference and message.reference.cached_message:
+            replied_msg = message.reference.cached_message
+            if replied_msg.content:
+                prompt += f"\n\n[Context: You previously said: \"{replied_msg.content}\"]"
 
         if not prompt:
             example = f"`@{bot.user.display_name} what is python?`" if mention_triggered else f"`{ai_trigger_phrase} what is python?`"
