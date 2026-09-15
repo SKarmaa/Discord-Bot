@@ -15,8 +15,7 @@ Both paths return a string that is ready to be sanitized and sent to Discord.
 from typing import Optional
 
 from config import FEATURES
-from core.ai_client import query_gemini_api
-from core.agentai_runtime import AgentAIRuntime, ToolCallStatus, get_agentai_runtime
+from core.agentai_runtime import AgentAIRuntime, get_agentai_runtime
 
 # ── second runtime instance (lazy-created) ─────────────
 _agentai_v2_runtime: Optional[AgentAIRuntime] = None
@@ -32,30 +31,7 @@ def get_agentai_v2_runtime() -> AgentAIRuntime:
 
 # ── public API ──────────────────────────────────────────────────────────────
 
-async def get_ai_response(prompt: str) -> str:
-    """Route a prompt to whichever AI provider is active in features.json.
-    
-    Returns a formatted string response ready for Discord.
-    """
-    provider = FEATURES.get("ai_provider", "gemini")
 
-    if provider == "agentai":
-        runtime = get_agentai_v2_runtime()
-        agent_response = await runtime.run(prompt, enable_tools=True)
-        
-        response_text = agent_response.content
-        
-        # Format tool calls if they exist
-        if agent_response.tool_calls:
-            tool_names = [tc.tool_name for tc in agent_response.tool_calls if tc.status == ToolCallStatus.SUCCESS]
-            if tool_names:
-                tool_info = "\n\n🔧 *Used tools: " + ", ".join(tool_names) + "*"
-                response_text += tool_info
-                
-        return response_text
-    else:
-        # Default / "gemini" — existing behaviour
-        return await query_gemini_api(prompt)
 
 def get_active_provider_name() -> str:
     """Human-readable name of the currently active AI provider."""

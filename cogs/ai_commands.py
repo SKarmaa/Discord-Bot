@@ -4,8 +4,9 @@ from discord import app_commands
 
 from bot_instance import bot
 from config import FEATURES
-from core.ai_client import ai_rate_limiter
-from core.agentai_provider import get_ai_response, get_active_provider_name
+from core.ai_client import ai_rate_limiter, query_gemini_api
+from core.agentai_provider import get_agentai_v2_runtime, get_active_provider_name
+from core.agentai_runtime import ToolCallStatus
 from core.features import require_feature
 from core.mention_safety import is_prompt_safe, sanitize_ai_response
 from core.permissions import is_admin_user
@@ -43,7 +44,17 @@ async def ai_command(interaction: discord.Interaction, prompt: str):
     if not is_admin:
         ai_rate_limiter.record_query(user_id)
     try:
-        raw_response = await get_ai_response(prompt)
+        provider = FEATURES.get("ai_provider", "gemini")
+        if provider == "agentai":
+            runtime = get_agentai_v2_runtime()
+            agent_response = await runtime.run(prompt, enable_tools=True)
+            raw_response = agent_response.content
+            if agent_response.tool_calls:
+                tool_names = [tc.tool_name for tc in agent_response.tool_calls if tc.status == ToolCallStatus.SUCCESS]
+                if tool_names:
+                    raw_response += "\n\n🔧 *Used tools: " + ", ".join(tool_names) + "*"
+        else:
+            raw_response = await query_gemini_api(prompt)
         response = sanitize_ai_response(raw_response)
         if len(response) > 2000:
             await interaction.followup.send(response[:1990] + "...")
