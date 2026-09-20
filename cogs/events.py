@@ -16,7 +16,7 @@ import discord
 
 from bot_instance import bot
 from config import CONFIG, FEATURES, TRIGGER_WORDS, WELCOME_MESSAGES, WITTY_RESPONSES
-from core.ai_client import ai_rate_limiter, query_gemini_api
+from core.ai_client import VIP_USER_ID, ai_rate_limiter, query_gemini_api
 from core.agentai_provider import get_agentai_v2_runtime
 from core.agentai_runtime import ToolCallStatus
 from core.mention_safety import is_prompt_safe, neutralize_mentions, sanitize_ai_response
@@ -116,6 +116,7 @@ async def on_message(message):
     if FEATURES.get("ai_chat", True) and (phrase_triggered or mention_triggered):
         user_id = message.author.id
         is_admin = is_admin_user(message.author)
+        is_vip = user_id == VIP_USER_ID
 
         if not is_admin:
             can_query, _ = ai_rate_limiter.can_query(user_id)
@@ -163,12 +164,17 @@ async def on_message(message):
             provider = FEATURES.get("ai_provider", "gemini")
             if provider == "agentai":
                 runtime = get_agentai_v2_runtime()
-                agent_response = await runtime.run(prompt, enable_tools=True)
+                try:
+                    agent_response = await runtime.run(prompt, enable_tools=True, is_vip=is_vip)
+                except TypeError:
+                    # Installed agentai runtime doesn't support is_vip yet.
+                    agent_response = await runtime.run(prompt, enable_tools=True)
                 raw_response = agent_response.content
 
             else:
-                raw_response = await query_gemini_api(prompt)
-            response = sanitize_ai_response(raw_response)
+                raw_response = await query_gemini_api(prompt, is_vip=is_vip)
+            # VIP responses are sent as-is — no mention/link/URL sanitization.
+            response = raw_response if is_vip else sanitize_ai_response(raw_response)
             if len(response) > 2000:
                 chunks = [response[i:i + 1990] for i in range(0, len(response), 1990)]
                 for i, chunk in enumerate(chunks):

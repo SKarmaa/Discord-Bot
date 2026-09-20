@@ -4,7 +4,7 @@ from discord import app_commands
 
 from bot_instance import bot
 from config import FEATURES
-from core.ai_client import ai_rate_limiter, query_gemini_api
+from core.ai_client import VIP_USER_ID, ai_rate_limiter, query_gemini_api
 from core.agentai_provider import get_agentai_v2_runtime, get_active_provider_name
 from core.agentai_runtime import ToolCallStatus
 from core.features import require_feature
@@ -19,6 +19,7 @@ async def ai_command(interaction: discord.Interaction, prompt: str):
     ai_cooldown_minutes = FEATURES.get("ai_cooldown_minutes", 15)
     user_id = interaction.user.id
     is_admin = is_admin_user(interaction.user)
+    is_vip = user_id == VIP_USER_ID
     if not is_admin:
         can_query, _ = ai_rate_limiter.can_query(user_id)
         if not can_query:
@@ -47,12 +48,17 @@ async def ai_command(interaction: discord.Interaction, prompt: str):
         provider = FEATURES.get("ai_provider", "gemini")
         if provider == "agentai":
             runtime = get_agentai_v2_runtime()
-            agent_response = await runtime.run(prompt, enable_tools=True)
+            try:
+                agent_response = await runtime.run(prompt, enable_tools=True, is_vip=is_vip)
+            except TypeError:
+                # Installed agentai runtime doesn't support is_vip yet.
+                agent_response = await runtime.run(prompt, enable_tools=True)
             raw_response = agent_response.content
 
         else:
-            raw_response = await query_gemini_api(prompt)
-        response = sanitize_ai_response(raw_response)
+            raw_response = await query_gemini_api(prompt, is_vip=is_vip)
+        # VIP responses are sent as-is — no mention/link/URL sanitization.
+        response = raw_response if is_vip else sanitize_ai_response(raw_response)
         if len(response) > 2000:
             await interaction.followup.send(response[:1990] + "...")
             for chunk in [response[i:i + 1990] for i in range(1990, len(response), 1990)]:
