@@ -268,9 +268,11 @@ async def stream_stop(ctx: commands.Context):
 
 
 @require_feature(FEATURE)
-@bot.command(name="mute")
-async def toggle_mute(ctx: commands.Context):
+@bot.command(name="micmute")
+async def toggle_mic_mute(ctx: commands.Context):
     """Toggle Discord mute via AutoHotkey bridge (Alt+H). (Admins only)
+    Named "micmute" (not "mute") to avoid colliding with moderation.py's
+    existing .mute command, which times out a member — unrelated feature.
     Not used by the auto-scheduler (the stream stays unmuted by default) —
     this is just here so you can flip it manually via a "." command
     instead of touching the PC."""
