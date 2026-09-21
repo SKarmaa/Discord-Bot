@@ -11,7 +11,7 @@
   "confessions": true,
   "giveaways": true,
   "admin_broadcast": true,
-  "pc_control": false,
+  "pc_control": true,
   "worldcup_tracker": false,
   "epl_tracker": true,
   "epl_target_channel_id": 0,
