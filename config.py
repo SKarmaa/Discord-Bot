@@ -58,6 +58,8 @@ DEFAULT_FEATURES = {
     "admin_broadcast": True,            # kpwrite/kpannounce/reload/words
     "pc_control": False,                # AutoHotkey/PC remote-control commands — OFF by default
     "worldcup_tracker": False,          # World Cup auto-stream scheduler + live scores — OFF by default
+    "epl_tracker": False,               # EPL auto-stream scheduler + live scores — OFF by default
+    "epl_target_channel_id": 0,         # 0/unset = falls back to target_channel_id
     "welcome_messages": True,
     "trigger_word_responses": True,
     "random_reactions": True,

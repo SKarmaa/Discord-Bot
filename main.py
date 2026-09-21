@@ -24,6 +24,7 @@ from cogs import (  # noqa: F401
     deploy,
     pc_control,
     worldcup,
+    epl,
 )
 
 

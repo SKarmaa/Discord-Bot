@@ -235,13 +235,19 @@ async def _send_ahk_command(cmd: str, timeout: float = 5.0) -> tuple[bool, str]:
 @require_feature(FEATURE)
 @bot.command(name="streamstart")
 async def stream_start(ctx: commands.Context):
-    """Start Discord screen-share via AutoHotkey bridge. (Admins only)"""
+    """Turn the Discord camera ON via AutoHotkey bridge (Alt+S). (Admins only)
+    NOTE: this used to toggle screen-share for the watchdgo/Edge setup
+    (worldcup.py). For the capture-card setup (epl.py) Alt+S is bound in
+    Discord to "Toggle Camera" instead, so this now turns the camera on.
+    Both cogs reuse this same command name/AHK hotkey — don't run WC and
+    EPL sequences in the same session unless Alt+S means the same thing
+    in your Discord keybinds for both."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
     ok, msg = await _send_ahk_command("streamstart")
     if ok:
-        await ctx.reply("📡 **Stream started!**")
+        await ctx.reply("📡 **Stream/camera started!**")
     else:
         await ctx.reply(f"❌ {msg}")
 
@@ -249,13 +255,31 @@ async def stream_start(ctx: commands.Context):
 @require_feature(FEATURE)
 @bot.command(name="streamstop")
 async def stream_stop(ctx: commands.Context):
-    """Stop Discord screen-share via AutoHotkey bridge. (Admins only)"""
+    """Turn the Discord camera OFF via AutoHotkey bridge (Alt+S). (Admins only)
+    See stream_start's note above — same hotkey, now means camera toggle."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
     ok, msg = await _send_ahk_command("streamstop")
     if ok:
-        await ctx.reply("🛑 **Stream stopped!**")
+        await ctx.reply("🛑 **Stream/camera stopped!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
+@require_feature(FEATURE)
+@bot.command(name="mute")
+async def toggle_mute(ctx: commands.Context):
+    """Toggle Discord mute via AutoHotkey bridge (Alt+H). (Admins only)
+    Not used by the auto-scheduler (the stream stays unmuted by default) —
+    this is just here so you can flip it manually via a "." command
+    instead of touching the PC."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ahk_command("togglemute")
+    if ok:
+        await ctx.reply("🎤 **Mute toggled!**")
     else:
         await ctx.reply(f"❌ {msg}")
 
