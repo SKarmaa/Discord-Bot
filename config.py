@@ -60,6 +60,9 @@ DEFAULT_FEATURES = {
     "worldcup_tracker": False,          # World Cup auto-stream scheduler + live scores — OFF by default
     "epl_tracker": True,               # EPL auto-stream scheduler + live scores — OFF by default
     "epl_target_channel_id": 0,         # 0/unset = falls back to target_channel_id
+    "stb_ir_control": False,            # Arduino Uno + IR bridge for NetTV box power — OFF by default
+    "stb_adb_control": True,           # ADB-over-wifi control for Android-TV STBs (preferred when available) — OFF by default
+    "epl_control_stb_power": True,     # if True, EPL auto-sequences also power the STB on/off (ADB preferred over IR if both enabled)
     "welcome_messages": True,
     "trigger_word_responses": True,
     "random_reactions": True,

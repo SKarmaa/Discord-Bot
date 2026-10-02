@@ -51,6 +51,21 @@ async def on_ready():
     else:
         print("🖥️  PC control disabled (features.json -> pc_control=false).")
 
+    if FEATURES.get("stb_ir_control", False):
+        from cogs.pc_control import start_arduino_bridge
+        start_arduino_bridge()
+        print("📺 Arduino IR bridge (NetTV power control) armed.")
+    else:
+        print("📺 Arduino IR bridge disabled (features.json -> stb_ir_control=false).")
+
+    if FEATURES.get("stb_adb_control", False):
+        from cogs.pc_control import connect_adb
+        ok, msg = connect_adb()
+        status = "connected" if ok else f"NOT connected ({msg[:120]})"
+        print(f"📺 ADB STB control armed — {status}")
+    else:
+        print("📺 ADB STB control disabled (features.json -> stb_adb_control=false).")
+
     if FEATURES.get("worldcup_tracker", False):
         from cogs.worldcup import wc_scheduler_loop, wc_live_score_loop
         bot.loop.create_task(wc_scheduler_loop())
@@ -58,6 +73,14 @@ async def on_ready():
         print("⚽ World Cup scheduler + live score tracker armed.")
     else:
         print("⚽ World Cup tracker disabled (features.json -> worldcup_tracker=false).")
+
+    if FEATURES.get("epl_tracker", False):
+        from cogs.epl import epl_scheduler_loop, epl_live_score_loop
+        bot.loop.create_task(epl_scheduler_loop())
+        bot.loop.create_task(epl_live_score_loop())
+        print("🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f EPL scheduler + live score tracker armed.")
+    else:
+        print("🏴 EPL tracker disabled (features.json -> epl_tracker=false).")
 
 
 @bot.event

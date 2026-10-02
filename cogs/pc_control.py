@@ -19,7 +19,9 @@ NameError — if you had a different implementation in mind, swap this out.
 import asyncio
 import ctypes
 import ctypes.wintypes
+import os
 import subprocess
+import time
 
 import discord
 from aiohttp import web as _web
@@ -29,6 +31,11 @@ from bot_instance import bot
 from core.features import require_feature
 from core.mention_safety import neutralize_mentions
 from core.permissions import is_admin_user
+
+try:
+    import serial as _pyserial  # pip install pyserial
+except ImportError:
+    _pyserial = None
 
 FEATURE = "pc_control"
 
@@ -601,3 +608,525 @@ async def debug_edge(ctx: commands.Context):
 
 # Alias used by cogs/events.py
 start_ahk_server = _start_ahk_server
+
+
+# ── NetTV set-top box power control via Arduino Uno + IR ────────────────────
+# The Arduino runs ir_bridge.ino, listens on Serial for text commands, and
+# fires the matching learned IR code at the box. This is a direct serial
+# link (not the HTTP polling the AHK bridge uses) — the Uno is plugged
+# straight into this laptop over USB.
+#
+# GATED SEPARATELY from "pc_control": controlled by the "stb_ir_control"
+# feature toggle (default: false), since it needs its own hardware
+# (Arduino Uno + IR receiver/emitter) that not every setup will have.
+#
+# Setup: flash ir_capture.ino once to learn your remote's codes, paste
+# them into ir_bridge.ino, flash that permanently, then set
+# ARDUINO_IR_PORT=COM<n> in your .env to match the Uno's COM port
+# (Device Manager -> Ports (COM & LPT) will show it).
+
+FEATURE_STB = "stb_ir_control"
+ARDUINO_IR_PORT = os.getenv("ARDUINO_IR_PORT", "COM5")
+ARDUINO_IR_BAUD = 115200
+
+_arduino_ser = None   # serial.Serial instance, opened once at startup
+
+
+def start_arduino_bridge():
+    """Open the serial connection to the Arduino. Called once from
+    cogs/events.py's on_ready if features.json -> stb_ir_control = true.
+    Safe to call even if the Arduino isn't plugged in yet — commands will
+    just report a clear connection error instead of the bot crashing."""
+    global _arduino_ser
+    if _pyserial is None:
+        print("⚠️  stb_ir_control: pyserial not installed (`pip install pyserial`) — Arduino IR bridge disabled.")
+        return
+    try:
+        _arduino_ser = _pyserial.Serial(ARDUINO_IR_PORT, ARDUINO_IR_BAUD, timeout=3)
+        time.sleep(2)  # the Uno resets when the serial port opens — give the sketch time to boot
+        print(f"✅ Arduino IR bridge connected on {ARDUINO_IR_PORT}")
+    except Exception as e:
+        print(f"⚠️  Could not open Arduino IR bridge on {ARDUINO_IR_PORT}: {e}. "
+              f"Check the port in Device Manager and set ARDUINO_IR_PORT in .env if it's different.")
+        _arduino_ser = None
+
+
+def _send_ir_command_sync(cmd: str) -> tuple[bool, str]:
+    if _arduino_ser is None:
+        return False, f"Arduino IR bridge not connected (port {ARDUINO_IR_PORT}). Is the Uno plugged in?"
+    try:
+        _arduino_ser.reset_input_buffer()
+        _arduino_ser.write((cmd.strip() + "\n").encode("utf-8"))
+        line = _arduino_ser.readline().decode("utf-8", errors="replace").strip()
+        if not line:
+            return False, "No response from Arduino (timed out) — check it's running ir_bridge.ino."
+        if line.startswith("OK"):
+            return True, line
+        return False, line
+    except Exception as e:
+        return False, str(e)
+
+
+async def _send_ir_command(cmd: str) -> tuple[bool, str]:
+    """Send one command (PING / POWER_ON / POWER_OFF / POWER_TOGGLE) to the
+    Arduino and wait for its reply. Runs the blocking pyserial call in an
+    executor so it doesn't block the bot's event loop."""
+    return await asyncio.get_event_loop().run_in_executor(None, _send_ir_command_sync, cmd)
+
+
+@require_feature(FEATURE_STB)
+@bot.command(name="stbon")
+async def stb_on(ctx: commands.Context):
+    """Turn the NetTV box on via IR (Arduino bridge). (Admins only)
+    Falls back to the toggle code if your remote doesn't have a distinct
+    Power On button — see ir_bridge.ino."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ir_command("POWER_ON")
+    if not ok and "NOT_CONFIGURED" in msg:
+        ok, msg = await _send_ir_command("POWER_TOGGLE")
+        if ok:
+            await ctx.reply("📺 **Power toggled** (no dedicated Power On code configured — used the toggle instead, so double-check it actually turned ON, not off).")
+            return
+    if ok:
+        await ctx.reply("📺 **NetTV box powered on!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
+@require_feature(FEATURE_STB)
+@bot.command(name="stboff")
+async def stb_off(ctx: commands.Context):
+    """Turn the NetTV box off via IR (Arduino bridge). (Admins only)
+    Falls back to the toggle code if your remote doesn't have a distinct
+    Power Off button — see ir_bridge.ino."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ir_command("POWER_OFF")
+    if not ok and "NOT_CONFIGURED" in msg:
+        ok, msg = await _send_ir_command("POWER_TOGGLE")
+        if ok:
+            await ctx.reply("📺 **Power toggled** (no dedicated Power Off code configured — used the toggle instead, so double-check it actually turned OFF, not on).")
+            return
+    if ok:
+        await ctx.reply("📺 **NetTV box powered off!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
+@require_feature(FEATURE_STB)
+@bot.command(name="stbtoggle")
+async def stb_toggle(ctx: commands.Context):
+    """Toggle the NetTV box's power directly via IR (Arduino bridge). (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ir_command("POWER_TOGGLE")
+    if ok:
+        await ctx.reply("📺 **Power toggled!**")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
+@require_feature(FEATURE_STB)
+@bot.command(name="stbtest")
+async def stb_test(ctx: commands.Context):
+    """Diagnose the Arduino IR bridge connection. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_ir_command("PING")
+    if ok:
+        await ctx.reply(f"✅ Arduino IR bridge is alive on `{ARDUINO_IR_PORT}`: `{msg}`\n"
+                         f"Try `.stbon` / `.stboff` / `.stbtoggle` to test the actual IR send.")
+    else:
+        await ctx.reply(f"❌ {msg}")
+
+
+# ── NetTV/Streamz box control via ADB (wifi) ────────────────────────────────
+# Some Android-TV-based set-top boxes (e.g. the newer Streamz+ NetTV units)
+# expose a real Developer Options menu with USB/network debugging, unlike
+# the earlier NetTV box which had none at all. Where available, this is
+# strictly better than the Arduino+IR route above: full remote control over
+# wifi, no extra hardware — and unlike an IR remote's single toggle button,
+# Android exposes DISTINCT wake/sleep keyevents, so .stbadbon/.stbadboff are
+# not ambiguous the way a toggle-only IR power button can be.
+#
+# GATED SEPARATELY: "stb_adb_control" feature toggle (default: false).
+#
+# One-time setup on the box: Settings -> Device Preferences -> About ->
+# tap the build number ~7 times to unlock Developer Options, then enable
+# "USB debugging" (and "Network debugging" / "Wireless debugging" if a
+# separate option is shown). From any machine on the same wifi, run
+# `adb connect <box-ip>:5555` once and accept the "Allow debugging?"
+# prompt on the TV with the remote — after that it reconnects automatically.
+# Set STB_ADB_HOST=<box-ip> (and STB_ADB_PORT if not 5555) in your .env.
+# `adb` (Android platform-tools) must be installed and on PATH on whatever
+# machine actually runs the bot, since this shells out to the real binary
+# rather than talking the ADB protocol directly.
+
+FEATURE_ADB = "stb_adb_control"
+ADB_HOST = os.getenv("STB_ADB_HOST", "")
+ADB_PORT = os.getenv("STB_ADB_PORT", "5555")
+ADB_TARGET = f"{ADB_HOST}:{ADB_PORT}" if ADB_HOST else ""
+
+# Keyevent names the simple nav/volume commands below send. Wake/sleep are
+# the two that matter most for the auto-scheduler — real distinct Android
+# keyevents, not a single ambiguous toggle like the IR remote's power button.
+_ADB_KEYEVENTS = {
+    "home": "KEYCODE_HOME",
+    "back": "KEYCODE_BACK",
+    "ok": "KEYCODE_DPAD_CENTER",
+    "up": "KEYCODE_DPAD_UP",
+    "down": "KEYCODE_DPAD_DOWN",
+    "left": "KEYCODE_DPAD_LEFT",
+    "right": "KEYCODE_DPAD_RIGHT",
+    "volup": "KEYCODE_VOLUME_UP",
+    "voldown": "KEYCODE_VOLUME_DOWN",
+    "mute": "KEYCODE_VOLUME_MUTE",
+    "play": "KEYCODE_MEDIA_PLAY_PAUSE",
+    "wake": "KEYCODE_WAKEUP",
+    "sleep": "KEYCODE_SLEEP",
+    "tv": "KEYCODE_TV",
+    "power": "KEYCODE_POWER",
+}
+
+# Default channel number for the full start sequence (".ststart" / the EPL
+# auto-scheduler). Override with STB_DEFAULT_CHANNEL in .env.
+STB_DEFAULT_CHANNEL = os.getenv("STB_DEFAULT_CHANNEL", "48")
+
+
+def connect_adb() -> tuple[bool, str]:
+    """Run `adb connect <host:port>` once. Called from cogs/events.py's
+    on_ready if features.json -> stb_adb_control = true. Safe to call even
+    if the box is offline or `adb` isn't installed — just reports a clear
+    error rather than crashing the bot."""
+    if not ADB_HOST:
+        return False, "STB_ADB_HOST not set in .env."
+    try:
+        result = subprocess.run(
+            ["adb", "connect", ADB_TARGET],
+            capture_output=True, text=True, timeout=10,
+        )
+        out = ((result.stdout or "") + (result.stderr or "")).strip()
+        ok = "connected" in out.lower() and "unable" not in out.lower() and "refused" not in out.lower()
+        return ok, out
+    except FileNotFoundError:
+        return False, "`adb` not found on PATH. Install Android platform-tools on this machine."
+    except Exception as e:
+        return False, str(e)
+
+
+def _run_adb_sync(args: list[str]) -> tuple[bool, str]:
+    if not ADB_HOST:
+        return False, "STB_ADB_HOST not set in .env."
+    try:
+        def _once():
+            return subprocess.run(
+                ["adb", "-s", ADB_TARGET] + args,
+                capture_output=True, text=True, timeout=10,
+            )
+        result = _once()
+        out = ((result.stdout or "") + (result.stderr or "")).strip()
+        stale = result.returncode != 0 or any(
+            s in out.lower() for s in ("device offline", "device not found", "no devices")
+        )
+        if stale:
+            # The box may have rebooted or the adb server lost the
+            # connection since last use — reconnect once and retry before
+            # giving up, rather than surfacing a flaky transient error.
+            connect_adb()
+            result = _once()
+            out = ((result.stdout or "") + (result.stderr or "")).strip()
+        return result.returncode == 0, out
+    except FileNotFoundError:
+        return False, "`adb` not found on PATH. Install Android platform-tools on this machine."
+    except Exception as e:
+        return False, str(e)
+
+
+async def _send_adb_keyevent(name: str) -> tuple[bool, str]:
+    """Send a named keyevent (see _ADB_KEYEVENTS) to the box. Runs the
+    blocking subprocess call in an executor so it doesn't block the bot's
+    event loop."""
+    code = _ADB_KEYEVENTS.get(name)
+    if not code:
+        return False, f"Unknown keyevent name: {name}"
+    return await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync, ["shell", "input", "keyevent", code]
+    )
+
+
+async def _send_adb_app(package: str) -> tuple[bool, str]:
+    """Launch an app by package name. Uses `monkey -c LAUNCHER` instead of
+    `am start -n`, since monkey only needs the package name — it finds the
+    launcher activity itself, so you don't need to know the exact
+    Activity class to launch something."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync,
+        ["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
+    )
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbconnect")
+async def stb_connect_cmd(ctx: commands.Context):
+    """(Re)connect ADB to the Streamz/NetTV box. Run this if the box dropped
+    its ADB connection (reboot, wifi hiccup, etc.) before using any other
+    .stb* command. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    if not ADB_HOST:
+        await ctx.reply("❌ `STB_ADB_HOST` not set in `.env`. Add `STB_ADB_HOST=<box-ip>` (and restart the bot) and try again.")
+        return
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, connect_adb)
+    emoji = "✅" if ok else "❌"
+    await ctx.reply(f"{emoji} `adb connect {ADB_TARGET}` → `{out[:300] or '(no output)'}`")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbraw")
+async def stb_raw(ctx: commands.Context, *, keys: str = ""):
+    """Send raw keyevent code(s) straight to `adb shell input keyevent`,
+    exactly as typed. (Admins only)
+    Example: `.stbraw KEYCODE_HOME` or `.stbraw KEYCODE_4 KEYCODE_9`"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    keys = keys.strip()
+    if not keys:
+        await ctx.reply("❌ Provide one or more keyevent codes. Example: `.stbraw KEYCODE_HOME`")
+        return
+    args = keys.split()
+    ok, msg = await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync, ["shell", "input", "keyevent"] + args
+    )
+    await ctx.reply(f"📺 **Sent:** `adb shell input keyevent {keys}`" if ok else f"❌ {msg}")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbadbtest")
+async def stb_adb_test(ctx: commands.Context):
+    """Diagnose the ADB connection to the Streamz/NetTV box. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    if not ADB_HOST:
+        await ctx.reply("❌ `STB_ADB_HOST` not set in `.env`. Add `STB_ADB_HOST=<box-ip>` (and restart the bot) and try again.")
+        return
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, connect_adb)
+    emoji = "✅" if ok else "❌"
+    await ctx.reply(f"{emoji} `adb connect {ADB_TARGET}` → `{out[:300] or '(no output)'}`\n"
+                     f"Try `.stbadbon` / `.stbhome` to test an actual command.")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbadbon")
+async def stb_adb_on(ctx: commands.Context):
+    """Wake the Streamz/NetTV box via ADB (KEYCODE_WAKEUP) — a real distinct
+    command, not a toggle. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_adb_keyevent("wake")
+    await ctx.reply("📺 **Box woken up!**" if ok else f"❌ {msg}")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbadboff")
+async def stb_adb_off(ctx: commands.Context):
+    """Put the Streamz/NetTV box to sleep via ADB (KEYCODE_SLEEP) — a real
+    distinct command, not a toggle. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, msg = await _send_adb_keyevent("sleep")
+    await ctx.reply("📺 **Box put to sleep!**" if ok else f"❌ {msg}")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbapp")
+async def stb_app(ctx: commands.Context, *, package: str = ""):
+    """Launch an app on the box by package name via ADB. (Admins only)
+    Example: `.stbapp com.google.android.youtube.tv`
+    Run `.stbapps` first to find the right package name."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    package = package.strip()
+    if not package:
+        await ctx.reply("❌ Provide a package name. Example: `.stbapp com.google.android.youtube.tv`\n"
+                         "Use `.stbapps` to list installed apps.")
+        return
+    ok, msg = await _send_adb_app(package)
+    await ctx.reply(f"📺 **Launched `{package}`!**" if ok else f"❌ {msg}")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbapps")
+async def stb_apps(ctx: commands.Context):
+    """List installed app package names on the box via ADB. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    ok, out = await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync, ["shell", "pm", "list", "packages"]
+    )
+    if not ok:
+        await ctx.reply(f"❌ {out}")
+        return
+    packages = out.replace("package:", "").strip()
+    if len(packages) > 1800:
+        packages = packages[:1800] + "\n… (truncated)"
+    await ctx.reply(f"📦 **Installed packages:**\n```\n{packages}\n```")
+
+
+# Simple one-keyevent nav/volume commands, generated from a table instead of
+# eleven near-identical function bodies. Each closure captures its own
+# cmd/key/desc via default-arg binding (avoids the late-binding-in-a-loop
+# footgun), so this is equivalent to writing eleven separate @bot.command
+# functions by hand.
+_SIMPLE_ADB_COMMANDS = {
+    "stbhome":    ("home",    "Home screen"),
+    "stbback":    ("back",    "Back"),
+    "stbok":      ("ok",      "OK / select"),
+    "stbup":      ("up",      "D-pad up"),
+    "stbdown":    ("down",    "D-pad down"),
+    "stbleft":    ("left",    "D-pad left"),
+    "stbright":   ("right",   "D-pad right"),
+    "stbvolup":   ("volup",   "Volume up"),
+    "stbvoldown": ("voldown", "Volume down"),
+    "stbmute":    ("mute",    "Mute toggle"),
+    "stbplay":    ("play",    "Play/pause"),
+    "stbtv":      ("tv",      "Live TV"),
+    "stbsleep":   ("sleep",   "Sleep"),
+    "stbpower":   ("power",   "Power"),
+}
+
+
+def _register_simple_adb_command(cmd_name: str, key_name: str, desc: str):
+    @require_feature(FEATURE_ADB)
+    @bot.command(name=cmd_name, help=f"{desc} on the Streamz/NetTV box via ADB. (Admins only)")
+    async def _cmd(ctx: commands.Context, _key_name=key_name, _desc=desc):
+        if not _pc_admin_check(ctx):
+            await ctx.reply("❌ You need Administrator permission to use this command.")
+            return
+        ok, msg = await _send_adb_keyevent(_key_name)
+        await ctx.reply(f"📺 **{_desc} sent!**" if ok else f"❌ {msg}")
+    return _cmd
+
+
+for _cmd_name, (_key_name, _desc) in _SIMPLE_ADB_COMMANDS.items():
+    _register_simple_adb_command(_cmd_name, _key_name, _desc)
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stbchannel")
+async def stb_channel(ctx: commands.Context, *, number: str = ""):
+    """Switch to a channel number via ADB, like typing it on the remote —
+    sends each digit as its own KEYCODE_<digit> keyevent in order.
+    (Admins only)
+    Example: `.stbchannel 49` presses 4 then 9."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    number = number.strip()
+    if not number.isdigit():
+        await ctx.reply("❌ Provide a channel number, digits only. Example: `.stbchannel 49`")
+        return
+    codes = [f"KEYCODE_{d}" for d in number]
+    ok, msg = await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync, ["shell", "input", "keyevent"] + codes
+    )
+    await ctx.reply(f"📺 **Switched to channel {number}!**" if ok else f"❌ {msg}")
+
+
+# ── Full match start/end sequences ──────────────────────────────────────────
+# Combine the ADB (box) and AHK (Discord) steps into the two sequences used
+# both by the manual .ststart/.stend commands below and by cogs/epl.py's
+# auto-scheduler, so there's exactly one place that defines "what a match
+# start/end actually does."
+#
+# Start: power the box on -> switch to the given channel -> join the VC ->
+#        turn the camera on.
+# End:   put the box to sleep -> disconnect from the VC. (No camera-off step
+#        — by design, per the shutdown sequence requested: sleep + disconnect
+#        only.)
+
+async def stb_full_start_sequence(channel_number: str | None = None) -> list[tuple[str, bool, str]]:
+    """Run the full match-start sequence. Returns a list of
+    (step_label, ok, message) tuples in the order each step ran, so callers
+    can report every step (not just the first failure)."""
+    results: list[tuple[str, bool, str]] = []
+
+    ok, msg = await _send_adb_keyevent("power")
+    results.append(("stbpower", ok, msg))
+    await asyncio.sleep(2)
+
+    ch = (channel_number or STB_DEFAULT_CHANNEL).strip()
+    if ch.isdigit():
+        codes = [f"KEYCODE_{d}" for d in ch]
+        ok, msg = await asyncio.get_event_loop().run_in_executor(
+            None, _run_adb_sync, ["shell", "input", "keyevent"] + codes
+        )
+        results.append((f"stbchannel {ch}", ok, msg))
+        await asyncio.sleep(2)
+
+    ok, msg = await _send_ahk_command("join", timeout=8.0)
+    results.append(("join", ok, msg))
+    await asyncio.sleep(3)
+
+    ok, msg = await _send_ahk_command("streamstart", timeout=8.0)
+    results.append(("streamstart", ok, msg))
+
+    return results
+
+
+async def stb_full_end_sequence() -> list[tuple[str, bool, str]]:
+    """Run the full match-end sequence: sleep the box, disconnect from the VC."""
+    results: list[tuple[str, bool, str]] = []
+
+    ok, msg = await _send_adb_keyevent("sleep")
+    results.append(("stbsleep", ok, msg))
+    await asyncio.sleep(2)
+
+    ok, msg = await _send_ahk_command("disconnect", timeout=8.0)
+    results.append(("disconnect", ok, msg))
+
+    return results
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="ststart")
+async def st_start(ctx: commands.Context, *, channel_number: str = ""):
+    """Run the full match-start sequence manually: power on -> switch
+    channel (default from STB_DEFAULT_CHANNEL, currently """ + STB_DEFAULT_CHANNEL + """) -> join VC -> camera on. (Admins only)
+    Example: `.ststart` (uses default channel) or `.ststart 48` (specific channel)."""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await ctx.reply("▶️ **Running full start sequence…**")
+    results = await stb_full_start_sequence(channel_number.strip() or None)
+    for label, ok, msg in results:
+        emoji = "✅" if ok else "❌"
+        await ctx.reply(f"{emoji} `{label}` {'done' if ok else f'failed: {msg}'}")
+    await ctx.reply("✅ **Start sequence complete!**")
+
+
+@require_feature(FEATURE_ADB)
+@bot.command(name="stend")
+async def st_end(ctx: commands.Context):
+    """Run the full match-end sequence manually: sleep box -> disconnect
+    from VC. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    await ctx.reply("▶️ **Running full end sequence…**")
+    results = await stb_full_end_sequence()
+    for label, ok, msg in results:
+        emoji = "✅" if ok else "❌"
+        await ctx.reply(f"{emoji} `{label}` {'done' if ok else f'failed: {msg}'}")
+    await ctx.reply("✅ **End sequence complete!**")

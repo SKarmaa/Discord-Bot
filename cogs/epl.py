@@ -15,10 +15,13 @@ browser to click through. The whole pre-match sequence is just:
     join the voice channel  ->  turn the camera on
 and post-match is just:
     turn the camera off  ->  disconnect
-That's what EPL_PRE_COMMANDS / EPL_POST_COMMANDS send below, reusing the
-same "join" / "disconnect" / "streamstart" / "streamstop" AHK commands
+That's what _epl_pre_commands() / _epl_post_commands() send below, reusing
+the same "join" / "disconnect" / "streamstart" / "streamstop" AHK commands
 pc_control.py already exposes (streamstart/streamstop now toggle the
-camera — see ahk bridge script — not a browser screen-share).
+camera — see ahk bridge script — not a browser screen-share). If the
+"epl_control_stb_power" toggle is on, those two functions also add a
+"stbon"/"stboff" step routed to the Arduino IR bridge instead of AHK —
+see cogs/pc_control.py's stb_ir_control section.
 
 Commands (.eplenable / .epldisable / .eplstatus / .epltest / .eplreset /
 .eplscores / .eplscore / .eplgo / .eplend) are all individually gated by
@@ -37,7 +40,10 @@ from bot_instance import bot
 from config import FEATURES
 from core.features import require_feature
 from core.mention_safety import neutralize_mentions
-from cogs.pc_control import _send_ahk_command, _pc_admin_check
+from cogs.pc_control import (
+    _send_ahk_command, _send_ir_command, _send_adb_keyevent, _pc_admin_check,
+    stb_full_start_sequence, stb_full_end_sequence,
+)
 
 FEATURE = "epl_tracker"
 
@@ -72,6 +78,14 @@ _epl_scheduled: dict[str, str] = {}    # "{match_id}_pre" | "{match_id}_post" ->
 _epl_matches_cache: list[dict] = []
 _epl_cache_time: float = 0.0
 _epl_finished_at: dict[str, datetime] = {}  # match_id -> UTC time we first saw FINISHED
+
+# ── Concurrent-match stream tracking ────────────────────────────────────────
+# Multiple EPL matches can be live at once. The box/camera/VC must only be
+# started ONCE even if a second match's pre-window fires while we're
+# already streaming, and must only be torn down once EVERY match that
+# triggered a start has also finished (not just the first one to end).
+_epl_streaming_active = False      # True from the first successful start until the last active match ends
+_epl_active_matches: set[str] = set()   # match ids currently "holding the stream open"
 EPL_CACHE_TTL_IDLE = 600               # seconds between refreshes when no match is near
 EPL_CACHE_TTL_LIVE = 60                # seconds between refreshes when a match is live/close
 EPL_PRE_WINDOW_LOW  = 4.5              # minutes before kickoff - start of firing window
@@ -79,11 +93,52 @@ EPL_PRE_WINDOW_HIGH = 5.5              # minutes before kickoff - end of firing 
 EPL_POST_DELAY      = 5                # minutes after FINISHED before firing post-sequence
 EPL_FALLBACK_MINUTES = 130             # fallback: fire post-match N min after kickoff if API stale
 
-# Pre-match command sequence (join VC, then turn the camera on).
-# 5 s gap is plenty since there's no browser/page to wait on, unlike WC.
-EPL_PRE_COMMANDS  = ["join", "streamstart"]
-# Post-match command sequence (camera off, then leave the VC).
-EPL_POST_COMMANDS = ["streamstop", "disconnect"]
+# Pre-match command sequence: optionally power the STB on first (if
+# "epl_control_stb_power" is enabled in features.json), then join VC, then
+# turn the camera on. Built as a function (not a fixed list) so flipping
+# these toggles takes effect on the next fire without a restart.
+#
+# Two power-control methods can be configured (cogs/pc_control.py has the
+# setup for each): ADB (stb_adb_control — preferred when available, since
+# KEYCODE_WAKEUP/KEYCODE_SLEEP are real distinct commands, not a toggle)
+# and Arduino+IR (stb_ir_control — the fallback for boxes with no
+# Developer Options, where the remote may only have a single toggle
+# button). If both happen to be enabled, ADB wins.
+def _epl_pre_commands() -> list[str]:
+    cmds = []
+    if FEATURES.get("epl_control_stb_power", False):
+        if FEATURES.get("stb_adb_control", False):
+            cmds.append("stbadbon")
+        elif FEATURES.get("stb_ir_control", False):
+            cmds.append("stbon")
+    cmds += ["join", "streamstart"]
+    return cmds
+
+
+# Post-match: camera off, leave the VC, then optionally power the STB off.
+def _epl_post_commands() -> list[str]:
+    cmds = ["streamstop", "disconnect"]
+    if FEATURES.get("epl_control_stb_power", False):
+        if FEATURES.get("stb_adb_control", False):
+            cmds.append("stbadboff")
+        elif FEATURES.get("stb_ir_control", False):
+            cmds.append("stboff")
+    return cmds
+
+
+# "stbon"/"stboff" don't go through the AHK bridge like everything else —
+# they're a direct serial command to the Arduino IR bridge instead. This
+# maps the EPL-sequence command name to the exact string ir_bridge.ino
+# expects (see cogs/pc_control.py's stbon/stboff commands for the same
+# on/off-with-toggle-fallback logic; this sequence path calls the same
+# underlying names for consistency but does not do the toggle fallback
+# itself — if you haven't configured POWER_ON/POWER_OFF in ir_bridge.ino,
+# use .stbtest to check before relying on the auto-scheduler for this).
+_STB_IR_COMMAND_MAP = {"stbon": "POWER_ON", "stboff": "POWER_OFF"}
+
+# "stbadbon"/"stbadboff" similarly bypass the AHK bridge, going straight to
+# pc_control.py's ADB keyevent sender instead — see _epl_run_sequence below.
+_STB_ADB_COMMAND_MAP = {"stbadbon": "wake", "stbadboff": "sleep"}
 
 # football-data.org - free tier, 10 req/min, no cost
 # Premier League competition code: PL   (id: 2021)
@@ -175,12 +230,21 @@ async def _epl_fetch_matches() -> list[dict]:
 
 
 async def _epl_run_sequence(commands: list[str], label: str, channel: discord.TextChannel):
-    """Send a sequence of AHK commands with a short gap, posting status in channel.
-    No browser/page to wait on here (unlike WC's clickplay), so a 5s gap is
-    plenty between join/camera/disconnect steps."""
+    """Send a sequence of commands with a short gap, posting status in channel.
+    Most steps go through the AHK bridge (join/streamstart/streamstop/
+    disconnect); stbon/stboff go straight to the Arduino IR bridge (see
+    _STB_IR_COMMAND_MAP), and stbadbon/stbadboff go straight to the ADB
+    keyevent sender (see _STB_ADB_COMMAND_MAP) instead. No browser/page to
+    wait on here (unlike WC's clickplay), so a 5s gap is plenty between
+    steps."""
     await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting sequence…")
     for i, cmd in enumerate(commands):
-        ok, msg = await _send_ahk_command(cmd, timeout=8.0)
+        if cmd in _STB_IR_COMMAND_MAP:
+            ok, msg = await _send_ir_command(_STB_IR_COMMAND_MAP[cmd])
+        elif cmd in _STB_ADB_COMMAND_MAP:
+            ok, msg = await _send_adb_keyevent(_STB_ADB_COMMAND_MAP[cmd])
+        else:
+            ok, msg = await _send_ahk_command(cmd, timeout=8.0)
         emoji = "✅" if ok else "❌"
         await channel.send(f"{emoji} `.{cmd}` {'done' if ok else f'failed: {msg}'}")
         if i < len(commands) - 1:
@@ -188,8 +252,40 @@ async def _epl_run_sequence(commands: list[str], label: str, channel: discord.Te
     await channel.send("✅ **Sequence complete!**")
 
 
+async def _epl_run_full_start(label: str, channel: discord.TextChannel):
+    """Dispatch the start sequence: the full power+channel+join+camera
+    sequence over ADB when available (preferred — real distinct power
+    keyevent, and can switch to the right channel), otherwise fall back to
+    the AHK-only join+camera sequence (optionally with Arduino IR power)."""
+    if FEATURES.get("epl_control_stb_power", False) and FEATURES.get("stb_adb_control", False):
+        await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting full sequence…")
+        results = await stb_full_start_sequence(os.getenv("STB_DEFAULT_CHANNEL") or None)
+        for cmd, ok, msg in results:
+            emoji = "✅" if ok else "❌"
+            await channel.send(f"{emoji} `{cmd}` {'done' if ok else f'failed: {msg}'}")
+        await channel.send("✅ **Sequence complete!**")
+    else:
+        await _epl_run_sequence(_epl_pre_commands(), label, channel)
+
+
+async def _epl_run_full_end(label: str, channel: discord.TextChannel):
+    """Dispatch the end sequence: sleep (ADB) + disconnect when ADB power
+    control is on, otherwise the old AHK/IR camera-off + disconnect (+
+    optional IR power-off) sequence."""
+    if FEATURES.get("epl_control_stb_power", False) and FEATURES.get("stb_adb_control", False):
+        await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting full sequence…")
+        results = await stb_full_end_sequence()
+        for cmd, ok, msg in results:
+            emoji = "✅" if ok else "❌"
+            await channel.send(f"{emoji} `{cmd}` {'done' if ok else f'failed: {msg}'}")
+        await channel.send("✅ **Sequence complete!**")
+    else:
+        await _epl_run_sequence(_epl_post_commands(), label, channel)
+
+
 async def _epl_scheduler_loop():
     """Background task - polls every 30 s and fires commands at the right times."""
+    global _epl_streaming_active
     await bot.wait_until_ready()
     print("🏴󠁧󠁢󠁥󠁮󠁧󠁿 EPL scheduler started (football-data.org live status).")
 
@@ -235,18 +331,28 @@ async def _epl_scheduler_loop():
                 minutes_to_start    = (kickoff - now_utc).total_seconds() / 60
                 minutes_since_start = (now_utc - kickoff).total_seconds() / 60
 
-                # PRE-MATCH: fire once, exactly in the pre-window before kickoff
+                # PRE-MATCH: fire once, exactly in the pre-window before kickoff.
+                # If we're already streaming (another match is live/holding
+                # the stream open), just register this match as another
+                # active one WITHOUT re-running the start sequence.
                 pre_key = f"{mid}_pre"
                 if pre_key not in _epl_scheduled and EPL_PRE_WINDOW_LOW <= minutes_to_start <= EPL_PRE_WINDOW_HIGH:
                     _epl_scheduled[pre_key] = "fired"
-                    print(f"[EPL Scheduler] PRE-MATCH -> {name} (kicks off in {minutes_to_start:.1f} min)")
-                    asyncio.create_task(
-                        _epl_run_sequence(
-                            EPL_PRE_COMMANDS,
-                            f"Pre-match — **{name}** kicks off in ~5 min!",
-                            channel,
+                    _epl_active_matches.add(mid)
+                    if not _epl_streaming_active:
+                        _epl_streaming_active = True
+                        print(f"[EPL Scheduler] PRE-MATCH -> {name} (starting stream, kicks off in {minutes_to_start:.1f} min)")
+                        asyncio.create_task(
+                            _epl_run_full_start(f"Pre-match — **{name}** kicks off in ~5 min!", channel)
                         )
-                    )
+                    else:
+                        print(f"[EPL Scheduler] PRE-MATCH -> {name} (already streaming — tracking as concurrent match, no restart)")
+                        asyncio.create_task(
+                            channel.send(
+                                f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **{name}** kicks off in ~5 min — already streaming for another match, "
+                                f"not restarting the sequence. ({len(_epl_active_matches)} match(es) now holding the stream open.)"
+                            )
+                        )
 
                 # POST-MATCH detection
                 post_key = f"{mid}_post"
@@ -259,24 +365,36 @@ async def _epl_scheduler_loop():
                         print(f"[EPL Scheduler] API says FINISHED for {name}, waiting {EPL_POST_DELAY} min…")
                     elif (now_utc - _epl_finished_at[mid]).total_seconds() / 60 >= EPL_POST_DELAY:
                         _epl_scheduled[post_key] = "fired"
+                        _epl_active_matches.discard(mid)
                         print(f"[EPL Scheduler] POST-MATCH (API FINISHED+{EPL_POST_DELAY}m) -> {name}")
-                        asyncio.create_task(
-                            _epl_run_sequence(
-                                EPL_POST_COMMANDS,
-                                f"Post-match — **{name}** has ended!",
-                                channel,
+                        if not _epl_active_matches:
+                            _epl_streaming_active = False
+                            asyncio.create_task(
+                                _epl_run_full_end(f"Post-match — **{name}** has ended!", channel)
                             )
-                        )
+                        else:
+                            asyncio.create_task(
+                                channel.send(
+                                    f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **{name}** has ended, but {len(_epl_active_matches)} other match(es) "
+                                    f"are still live — keeping the stream running."
+                                )
+                            )
                 elif minutes_since_start >= EPL_FALLBACK_MINUTES:
                     _epl_scheduled[post_key] = "fired"
+                    _epl_active_matches.discard(mid)
                     print(f"[EPL Scheduler] POST-MATCH (fallback {EPL_FALLBACK_MINUTES}m) -> {name}")
-                    asyncio.create_task(
-                        _epl_run_sequence(
-                            EPL_POST_COMMANDS,
-                            f"Post-match — **{name}** (fallback timer, API may be stale)",
-                            channel,
+                    if not _epl_active_matches:
+                        _epl_streaming_active = False
+                        asyncio.create_task(
+                            _epl_run_full_end(f"Post-match — **{name}** (fallback timer, API may be stale)", channel)
                         )
-                    )
+                    else:
+                        asyncio.create_task(
+                            channel.send(
+                                f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **{name}** hit its fallback timer, but {len(_epl_active_matches)} other "
+                                f"match(es) are still live — keeping the stream running."
+                            )
+                        )
 
         except Exception as e:
             print(f"[EPL Scheduler] Loop error: {e}")
@@ -531,23 +649,33 @@ async def epl_score_cmd(ctx: commands.Context, *, team: str = ""):
 @require_feature(FEATURE)
 @bot.command(name="eplgo")
 async def epl_go(ctx: commands.Context):
-    """Manually run the full stream-start sequence. (Admins only)
-    Sequence: join -> streamstart (camera on)."""
+    """Manually run the full stream-start sequence (same one the scheduler
+    uses): power on -> channel -> join -> camera on (ADB mode), or
+    join -> camera on (AHK/IR-only mode). (Admins only)"""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    await _epl_run_sequence(EPL_PRE_COMMANDS, "Manual Stream Start", ctx.channel)
+    global _epl_streaming_active
+    _epl_streaming_active = True
+    await _epl_run_full_start("Manual Stream Start", ctx.channel)
 
 
 @require_feature(FEATURE)
 @bot.command(name="eplend")
 async def epl_end(ctx: commands.Context):
-    """Manually run the full stream-end sequence. (Admins only)
-    Sequence: streamstop (camera off) -> disconnect."""
+    """Manually run the full stream-end sequence (same one the scheduler
+    uses): sleep -> disconnect (ADB mode), or camera off -> disconnect
+    (AHK/IR-only mode). (Admins only)
+    NOTE: this ends the stream regardless of whether another match is still
+    tracked as active — use this to force-end if the auto-scheduler is
+    stuck thinking a match is still live."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
-    await _epl_run_sequence(EPL_POST_COMMANDS, "Manual Stream End", ctx.channel)
+    global _epl_streaming_active
+    _epl_streaming_active = False
+    _epl_active_matches.clear()
+    await _epl_run_full_end("Manual Stream End", ctx.channel)
 
 
 # ── Admin commands ────────────────────────────────────────────────────────
@@ -602,6 +730,11 @@ async def epl_status(ctx: commands.Context):
     )
     embed.add_field(name="Status", value=status_str, inline=True)
     embed.add_field(name="Data Source", value="football-data.org (live)", inline=True)
+    streaming_str = (
+        f"🔴 Live — {len(_epl_active_matches)} match(es) holding it open"
+        if _epl_streaming_active else "⚪ Not streaming"
+    )
+    embed.add_field(name="Stream State", value=streaming_str, inline=True)
     embed.add_field(
         name="Matches",
         value=f"{len(matches)} total • {len(live)} live • {len(upcoming)} upcoming",
@@ -709,8 +842,10 @@ async def epl_reset(ctx: commands.Context):
     _epl_finished_at.clear()
     _epl_score_messages.clear()
     _epl_last_score_render.clear()
-    global _epl_cache_time
+    _epl_active_matches.clear()
+    global _epl_cache_time, _epl_streaming_active
     _epl_cache_time = 0.0
+    _epl_streaming_active = False
     await ctx.reply("🔄 EPL scheduler + live scores reset — all matches re-armed!")
 
 
