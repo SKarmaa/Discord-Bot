@@ -32,5 +32,13 @@
   "deploy_repo_path": "C:/Users/shopn/Desktop/Discord-Bot",
   "deploy_git_remote": "origin",
   "deploy_git_branch": "main",
-  "deploy_restart_method": "exit"
+  "deploy_restart_method": "exit",
+  "music": true,
+  "music_idle_timeout_minutes": 5,
+  "music_alone_timeout_seconds": 60,
+  "music_max_queue": 100,
+  "music_max_playlist_import": 50,
+  "music_default_volume": 60,
+  "music_ffmpeg_path": "ffmpeg",
+  "music_cookies_file": ""
 }

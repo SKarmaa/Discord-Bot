@@ -360,6 +360,55 @@ bot run whatever code is on that branch, tighten that check in
 included `.gitignore`) — otherwise `git pull` can conflict with, or
 overwrite, your live runtime data.
 
+## Music (`cogs/music.py`)
+
+Plays YouTube / YouTube Music audio in voice channels. No Google account is
+needed, and there are no ads: yt-dlp fetches the audio stream directly, and
+ads only exist inside YouTube's own player.
+
+**Commands** (also available as `/music <command>`):
+
+| Command | What it does |
+| --- | --- |
+| `.play <song or link>` / `.p` | Join your voice channel and play or queue a song, YouTube/YouTube Music link, or playlist link (up to `music_max_playlist_import` tracks) |
+| `.skip` / `.next` | Skip the current track |
+| `.pause` / `.unpause` | Pause / resume (`.resume` is the PC-control DGO command) |
+| `.stop` / `.leave` / `.dc` | Clear the queue and leave voice |
+| `.queue` / `.q` | Show the queue |
+| `.np` / `.nowplaying` | Show the current track |
+| `.loop [off\|track\|queue]` | Set loop mode (no argument cycles through them) |
+| `.shuffle` | Shuffle the queue |
+| `.remove <n>` | Remove track number `n` from the queue |
+| `.volume [0-150]` / `.vol` | Show or set the volume |
+| `.ytupdate` | Admins: update yt-dlp to the latest nightly, then restart the bot |
+
+You must be in the bot's voice channel to control playback. The bot leaves on
+its own after `music_idle_timeout_minutes` with nothing queued, or
+`music_alone_timeout_seconds` after everyone else leaves.
+
+**One-time setup on the machine that runs the bot (Windows):**
+
+```powershell
+pip install -U -r requirements.txt
+pip install -U --pre "yt-dlp[default]"   # nightly yt-dlp (stable can't play music videos)
+winget install Gyan.FFmpeg
+winget install DenoLand.Deno               # yt-dlp needs Deno for YouTube's JS challenges
+```
+
+Restart the terminal (or the NSSM service) afterwards so FFmpeg and Deno are on
+PATH. If FFmpeg still isn't found, put its full path in `music_ffmpeg_path`
+(for example `C:/ffmpeg/bin/ffmpeg.exe`).
+
+`discord.py[voice]>=2.7.1` is required. Discord has required the DAVE voice
+encryption protocol for every voice connection since March 2026; older
+discord.py versions can't join voice channels at all.
+
+**When playback breaks** (YouTube changes something every few weeks), run
+`.ytupdate` and restart the bot. If YouTube starts saying "Sign in to confirm
+you're not a bot", export cookies from a **throwaway** Google account to a
+`cookies.txt` file and set `music_cookies_file` to its path. Never use your
+main account, and never commit the cookies file (it's in `.gitignore`).
+
 ## Notes / things worth knowing
 
 - **`pc_control`, `worldcup_tracker`, `epl_tracker`, `stb_ir_control`, and

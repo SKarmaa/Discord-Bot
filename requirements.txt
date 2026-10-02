@@ -1,5 +1,6 @@
-discord.py>=2.3.0
+discord.py[voice]>=2.7.1
 aiohttp
 python-dotenv
 pytz
 nepali-datetime
+yt-dlp[default]

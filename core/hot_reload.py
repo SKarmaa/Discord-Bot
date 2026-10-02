@@ -58,6 +58,7 @@ COG_MODULES = [
     "cogs.admin_broadcast",
     "cogs.pc_control",
     "cogs.worldcup",
+    "cogs.music",
     # cogs.deploy is deliberately excluded: it's the module currently
     # running this reload. A change to deploy.py itself needs a restart.
 ]
@@ -69,8 +70,20 @@ def _strip_module_registrations(bot, module_name: str) -> int:
     there. Returns how many things were removed."""
     removed = 0
 
+    def _tree_cmd_module(cmd):
+        # Plain slash commands have a .callback; slash command groups (e.g.
+        # /music) don't, so use the module of their first subcommand.
+        cb = getattr(cmd, "callback", None)
+        if cb is not None:
+            return getattr(cb, "__module__", None)
+        for sub in getattr(cmd, "commands", []):
+            mod = _tree_cmd_module(sub)
+            if mod:
+                return mod
+        return None
+
     for cmd in list(bot.tree.get_commands()):
-        if getattr(cmd.callback, "__module__", None) == module_name:
+        if _tree_cmd_module(cmd) == module_name:
             bot.tree.remove_command(cmd.name)
             removed += 1
 

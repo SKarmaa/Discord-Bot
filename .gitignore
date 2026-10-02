@@ -123,3 +123,6 @@ logs/
 # Bot specific files (optional - uncomment if you want to ignore)
 bot_data.json
 # *.json
+# YouTube cookies for the music cog (never commit these)
+cookies.txt
+*cookies*.txt

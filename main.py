@@ -25,6 +25,7 @@ from cogs import (  # noqa: F401
     pc_control,
     worldcup,
     epl,
+    music,
 )
 
 
