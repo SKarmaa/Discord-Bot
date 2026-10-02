@@ -1110,10 +1110,11 @@ async def st_start(ctx: commands.Context, *, channel_number: str = ""):
         return
     await ctx.reply("▶️ **Running full start sequence…**")
     results = await stb_full_start_sequence(channel_number.strip() or None)
-    for label, ok, msg in results:
-        emoji = "✅" if ok else "❌"
-        await ctx.reply(f"{emoji} `{label}` {'done' if ok else f'failed: {msg}'}")
-    await ctx.reply("✅ **Start sequence complete!**")
+    failed = [f"`{label}`: {msg}" for label, ok, msg in results if not ok]
+    if failed:
+        await ctx.reply("⚠️ **Start sequence finished with issues:**\n" + "\n".join(failed))
+    else:
+        await ctx.reply("✅ **Start sequence done!**")
 
 
 @require_feature(FEATURE_ADB)
@@ -1126,7 +1127,8 @@ async def st_end(ctx: commands.Context):
         return
     await ctx.reply("▶️ **Running full end sequence…**")
     results = await stb_full_end_sequence()
-    for label, ok, msg in results:
-        emoji = "✅" if ok else "❌"
-        await ctx.reply(f"{emoji} `{label}` {'done' if ok else f'failed: {msg}'}")
-    await ctx.reply("✅ **End sequence complete!**")
+    failed = [f"`{label}`: {msg}" for label, ok, msg in results if not ok]
+    if failed:
+        await ctx.reply("⚠️ **End sequence finished with issues:**\n" + "\n".join(failed))
+    else:
+        await ctx.reply("✅ **End sequence done!**")

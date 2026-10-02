@@ -258,12 +258,13 @@ async def _epl_run_full_start(label: str, channel: discord.TextChannel):
     keyevent, and can switch to the right channel), otherwise fall back to
     the AHK-only join+camera sequence (optionally with Arduino IR power)."""
     if FEATURES.get("epl_control_stb_power", False) and FEATURES.get("stb_adb_control", False):
-        await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting full sequence…")
+        await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting sequence…")
         results = await stb_full_start_sequence(os.getenv("STB_DEFAULT_CHANNEL") or None)
-        for cmd, ok, msg in results:
-            emoji = "✅" if ok else "❌"
-            await channel.send(f"{emoji} `{cmd}` {'done' if ok else f'failed: {msg}'}")
-        await channel.send("✅ **Sequence complete!**")
+        failed = [f"`{cmd}`: {msg}" for cmd, ok, msg in results if not ok]
+        if failed:
+            await channel.send("⚠️ **Sequence finished with issues:**\n" + "\n".join(failed))
+        else:
+            await channel.send("✅ **Done!**")
     else:
         await _epl_run_sequence(_epl_pre_commands(), label, channel)
 
@@ -273,12 +274,13 @@ async def _epl_run_full_end(label: str, channel: discord.TextChannel):
     control is on, otherwise the old AHK/IR camera-off + disconnect (+
     optional IR power-off) sequence."""
     if FEATURES.get("epl_control_stb_power", False) and FEATURES.get("stb_adb_control", False):
-        await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting full sequence…")
+        await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting sequence…")
         results = await stb_full_end_sequence()
-        for cmd, ok, msg in results:
-            emoji = "✅" if ok else "❌"
-            await channel.send(f"{emoji} `{cmd}` {'done' if ok else f'failed: {msg}'}")
-        await channel.send("✅ **Sequence complete!**")
+        failed = [f"`{cmd}`: {msg}" for cmd, ok, msg in results if not ok]
+        if failed:
+            await channel.send("⚠️ **Sequence finished with issues:**\n" + "\n".join(failed))
+        else:
+            await channel.send("✅ **Done!**")
     else:
         await _epl_run_sequence(_epl_post_commands(), label, channel)
 
