@@ -18,6 +18,40 @@ python main.py
 `features.json` (toggles) are both auto-created with sensible defaults on
 first run if they don't already exist, same as before.
 
+## `.env` reference
+
+```env
+# Discord bot token (either name works — config.py checks TOKEN first, then DISCORD_TOKEN)
+TOKEN=your_discord_bot_token
+
+# AI chat (Gemini)
+GEMINI_API_KEY=your_gemini_api_key
+
+# World Cup / EPL live match data (football-data.org — free tier, same key for both)
+FOOTBALL_DATA_API_KEY=your_footballdata_api_key
+
+# Arduino Uno + IR bridge (stb_ir_control) — only needed if you're using that
+# box/hardware. Check Device Manager > Ports (COM & LPT) for the right COM port.
+ARDUINO_IR_PORT=COM5
+
+# ADB control for an Android-TV set-top box, e.g. a Streamz/NetTV box with
+# Developer Options (stb_adb_control) — the box's IP on your wifi.
+STB_ADB_HOST=192.168.x.x
+STB_ADB_PORT=5555
+
+# Default channel number the .ststart full sequence / EPL auto-scheduler
+# switches to when powering on. Optional — defaults to "48" in code even if
+# left out of .env entirely.
+STB_DEFAULT_CHANNEL=48
+```
+
+Required: `TOKEN`, `GEMINI_API_KEY`. Everything else is only needed if the
+matching feature toggle (below) is turned on.
+
+`adb` (Android platform-tools) and AutoHotkey both need to be installed and
+reachable on whatever machine actually runs the bot — see the STB/EPL
+section below for details.
+
 ## Folder layout
 
 ```
@@ -45,8 +79,9 @@ cogs/
   confession.py                  /confess
   giveaway.py                     /giveaway and friends
   admin_broadcast.py               /kpwrite, /kpannounce, /reload, .words, .reload-data
-  pc_control.py                     AutoHotkey/PC remote-control commands (Windows only)
-  worldcup.py                        World Cup 2026 auto-stream scheduler + live scores
+  pc_control.py                     AutoHotkey bridge + NetTV/STB remote control (IR + ADB)
+  worldcup.py                        World Cup 2026 auto-stream scheduler + live scores (browser/screen-share setup)
+  epl.py                              Premier League auto-stream scheduler + live scores (capture-card/webcam setup)
 ```
 
 ## Feature toggles (`features.json`)
@@ -66,8 +101,13 @@ Every major area can be switched off without touching code:
 | `giveaways` | true | `/giveaway` and friends |
 | `admin_broadcast` | true | `/kpwrite`, `/kpannounce` |
 | `deploy` | **false** | `/update`, `.update` — `git pull` + self-restart (see below) |
-| `pc_control` | **false** | AutoHotkey/PC remote-control commands (Windows-only, needs a local AHK script) |
-| `worldcup_tracker` | **false** | World Cup auto-stream scheduler + live scores (needs `FOOTBALL_DATA_API_KEY`) |
+| `pc_control` | **false** | AHK bridge / Discord join-mute-disconnect / Edge-browser commands (Windows-only, needs a local AHK script) |
+| `worldcup_tracker` | **false** | World Cup auto-stream scheduler + live scores — browser/screen-share setup (needs `FOOTBALL_DATA_API_KEY`) |
+| `epl_tracker` | **false** | Premier League auto-stream scheduler + live scores — capture-card/webcam setup (needs `FOOTBALL_DATA_API_KEY`) |
+| `epl_target_channel_id` | 0 | channel the EPL scheduler posts to; `0`/unset falls back to `target_channel_id` |
+| `stb_ir_control` | **false** | Arduino Uno + IR bridge for NetTV box power (`.stbon`/`.stboff`/`.stbtoggle`/`.stbtest`) |
+| `stb_adb_control` | **false** | ADB-over-wifi control for an Android-TV STB (`.stb*` ADB commands below) — preferred over IR when the box supports it |
+| `epl_control_stb_power` | **false** | if true, the EPL auto-scheduler's start/end sequences also power the STB on/off (ADB preferred over IR if both are enabled) |
 | `welcome_messages` | true | posting a welcome message on member join |
 | `trigger_word_responses` | true | the 30%-chance witty-word replies |
 | `random_reactions` | true | the 1%-chance random emoji reactions |
@@ -82,7 +122,144 @@ Edit `features.json` and either restart the bot or run `/reload` /
 If a toggled-off command is used anyway, the bot replies with a short
 "this feature is currently turned off" message instead of silently failing.
 
-## The @everyone / @here safety net
+## NetTV / set-top-box control (`cogs/pc_control.py`)
+
+Two independent ways to control the physical NetTV/Streamz box, plus the AHK
+bridge that drives Discord itself (join VC, camera, mute, disconnect). Pick
+whichever matches your box — **ADB is strictly better where available**
+(real distinct keyevents, no extra hardware, works over wifi), so use IR only
+on an older box with no Developer Options menu.
+
+### ADB control (`stb_adb_control`) — preferred
+
+One-time setup on the box: enable Developer Options (tap the build number
+~7 times under Settings → Device Preferences → About) → enable USB/Network
+debugging. From any machine on the same wifi, `adb connect <box-ip>:5555`
+once and accept the "Allow debugging?" prompt on the TV with the remote —
+after that it reconnects automatically. `adb` (Android platform-tools) must
+be installed and on **PATH** on the machine actually running the bot (it
+shells out to the real `adb.exe`/`adb` binary) — see "Installing adb" below
+if you hit `'adb' is not recognized`.
+
+| Command | Does |
+|---|---|
+| `.stbconnect` | Re-run `adb connect` to the box (use after a reboot/wifi drop) |
+| `.stbadbtest` | Diagnose the ADB connection |
+| `.stbadbon` / `.stbadboff` | `KEYCODE_WAKEUP` / `KEYCODE_SLEEP` — real distinct commands, not a toggle |
+| `.stbpower` | `KEYCODE_POWER` |
+| `.stbsleep` | `KEYCODE_SLEEP` |
+| `.stbtv` | `KEYCODE_TV` — switch to Live TV |
+| `.stbchannel <number>` | Types the digits like the remote, e.g. `.stbchannel 49` → presses 4 then 9 |
+| `.stbhome` / `.stbback` / `.stbok` | Home / Back / D-pad select |
+| `.stbup` / `.stbdown` / `.stbleft` / `.stbright` | D-pad navigation |
+| `.stbvolup` / `.stbvoldown` / `.stbmute` | Volume |
+| `.stbplay` | Play/pause |
+| `.stbraw <keycodes>` | Sends exactly what you type to `adb shell input keyevent`, e.g. `.stbraw KEYCODE_HOME KEYCODE_BACK` |
+| `.stbapp <package>` | Launch an app by package name |
+| `.stbapps` | List installed app package names |
+
+**Full combined sequences** (power + channel + Discord, all in one):
+
+| Command | Does |
+|---|---|
+| `.ststart [channel]` | Power on → switch channel (default `STB_DEFAULT_CHANNEL`, `48`) → join VC → camera on |
+| `.stend` | Sleep the box → disconnect from VC |
+
+Both reply once at the start ("Running full start/end sequence…") and once
+at the end ("done!") rather than narrating every step — a step's failure is
+still called out individually if one happens.
+
+#### Installing `adb` (if you get `'adb' is not recognized`)
+
+1. Download "SDK Platform-Tools for Windows" from
+   https://developer.android.com/tools/releases/platform-tools (just the
+   zip — no need for full Android Studio).
+2. Extract to a permanent folder, e.g. `C:\platform-tools`.
+3. Add that folder to your **PATH** (Win → search "Environment Variables" →
+   Edit the system environment variables → Environment Variables → select
+   `Path` → Edit → New → paste the folder → OK everywhere).
+4. Open a **new** terminal (PATH changes don't apply to already-open ones)
+   and confirm with `adb version`.
+5. Restart the bot so it picks up the same PATH.
+
+### IR control (`stb_ir_control`) — fallback for boxes with no Developer Options
+
+An Arduino Uno + IR transmitter/receiver module, flashed with
+`ir_bridge.ino`, talks to the bot over USB serial (`ARDUINO_IR_PORT`,
+115200 baud). `ir_capture.ino` is a one-time-use sketch to learn your
+remote's IR codes — flash it, capture the codes, paste them into
+`ir_bridge.ino`, then flash that permanently.
+
+| Command | Does |
+|---|---|
+| `.stbtest` | Diagnose the Arduino serial connection (`PING`) |
+| `.stbon` / `.stboff` | Power on/off (falls back to `.stbtoggle` if no dedicated code is configured) |
+| `.stbtoggle` | Toggle power directly |
+
+### AHK bridge (`pc_control`) — Discord-side control
+
+Runs a tiny local HTTP server (`localhost:9876`) that `bot_desktop_bridge.ahk`
+polls, so Discord's own UI (join VC, camera, mute, disconnect, plus the
+World-Cup browser/Edge commands) can be driven by `.` commands. Set it to
+run on Windows startup so it's always there after a reboot.
+
+| Command | Does |
+|---|---|
+| `.join` / `.disconnect` | Join/leave the voice channel (Alt+J / Alt+G) |
+| `.streamstart` / `.streamstop` | Camera on/off for the capture-card setup (Alt+S) — toggles screen-share instead for the World Cup/browser setup |
+| `.micmute` | Toggle Discord mute (Alt+H) — named "micmute", not "mute", to avoid colliding with moderation's `.mute` (timeout) command |
+| `.refresh` / `.openlink` / `.closelink` / `.fullscreen` / `.focusedge` / `.clickplay` / `.closeedge` / `.resume` | World Cup/Edge-browser helper commands |
+| `.debugwindows` / `.testinput` / `.debugdiscord` / `.debugedge` | Diagnostics |
+
+## Auto-stream schedulers (`worldcup.py` / `epl.py`)
+
+Both poll football-data.org (free tier, `FOOTBALL_DATA_API_KEY`, shared
+between the two) and automatically run a start sequence ~5 min before
+kickoff and an end sequence after the match finishes. `worldcup.py` drives
+a browser (Edge + watchdgo.com) for screen-share; `epl.py` instead assumes a
+USB capture card that Discord sees as a webcam, so its sequence is just
+"power → channel → join → camera on" / "sleep → disconnect" (via the ADB
+full sequences above when `epl_control_stb_power` + `stb_adb_control` are
+both on, otherwise falls back to the plain join/camera AHK commands, with
+IR power if `stb_ir_control` is on instead).
+
+**Polling, not push** — football-data.org has no webhooks. The scheduler
+loop checks every **30 seconds**, but the underlying match-list fetch is
+cached: **10 minutes** between real API calls when nothing is close to
+kickoff, tightening to **60 seconds** once a match is live or within 2
+hours of kickoff. The separate live-score-embed loop updates every **60
+seconds**. This is comfortably inside the 4.5–5.5 min pre-kickoff firing
+window and the 5-min post-FINISHED delay, so nothing gets missed.
+
+**Concurrent matches are handled correctly** — `epl.py` tracks which match
+IDs are currently "holding the stream open" (`_epl_active_matches`). If a
+second match's pre-window fires while the first is still live, it's added
+to that set WITHOUT re-running the start sequence (join/camera-on don't
+fire twice). The end sequence only runs once that set is empty — i.e. once
+every match that triggered a start has also finished — so one match ending
+early doesn't cut the stream while another is still live.
+
+EPL commands: `.eplenable` / `.epldisable` / `.eplstatus` / `.epltest` /
+`.eplreset` / `.eplscores` / `.eplscore [team]` / `.eplgo` (manual start) /
+`.eplend` (manual end, force-clears the active-match tracking too).
+
+## Feature toggles quick-reference for the STB/EPL stack
+
+To run the full ADB-powered EPL auto-stream setup:
+
+```json
+"epl_tracker": true,
+"stb_adb_control": true,
+"epl_control_stb_power": true,
+"pc_control": true
+```
+
+...plus `FOOTBALL_DATA_API_KEY`, `STB_ADB_HOST`, and `adb` + the AHK script
+both running on the host machine.
+
+## Feature toggles (`features.json`) — safety & deploy
+
+### The @everyone / @here safety net
 
 This was the other big ask, so it's worth explaining clearly
 (`core/mention_safety.py` has the same explanation in code comments).
@@ -137,7 +314,7 @@ Both layers are independent on purpose — if one is ever misconfigured or a
 future command forgets to call the text-scrubbing helper, the global
 `allowed_mentions` default still holds the line.
 
-## `/update` and `.update` — git pull + apply changes
+### `/update` and `.update` — git pull + apply changes
 
 Disabled by default (`features.json -> "deploy": false`). Once enabled, an
 admin can run `/update` or `.update` to run `git pull --ff-only <remote>
@@ -185,19 +362,20 @@ overwrite, your live runtime data.
 
 ## Notes / things worth knowing
 
-- **`pc_control` and `worldcup_tracker` default to `false`.** They're
-  Windows-only / require a locally-running AutoHotkey script and an
-  external API key respectively. The bot now runs fine on Linux/Mac with
-  these off — previously the whole bot would crash on non-Windows hosts
-  because of an unconditional `ctypes.windll` reference at import time. This
-  is now guarded and only actually breaks (with a clear error, not a crash)
-  if you enable `pc_control` on a non-Windows host.
+- **`pc_control`, `worldcup_tracker`, `epl_tracker`, `stb_ir_control`, and
+  `stb_adb_control` all default to `false`.** They're Windows-only / require
+  locally-running AutoHotkey + (for STB control) either an Arduino+IR rig or
+  `adb` on PATH, plus an external API key for the match trackers. The bot
+  runs fine on Linux/Mac with these off — previously the whole bot would
+  crash on non-Windows hosts because of an unconditional `ctypes.windll`
+  reference at import time. This is now guarded and only actually breaks
+  (with a clear error, not a crash) if you enable `pc_control` on a
+  non-Windows host.
 - **`_run_ps()`** (used by `.debugwindows`, `.testinput`, `.debugdiscord`,
   `.debugedge`) was referenced in your original file but never defined
   anywhere in it — it would have raised `NameError` if those specific
   commands were ever invoked. A straightforward PowerShell-runner was added
   in `cogs/pc_control.py` so they work; swap it out if you had a different
   implementation elsewhere.
-- Command *names* and *behavior* are unchanged — verified the new bot
-  registers the exact same 35 slash commands and 45 prefix commands as the
-  original file, no more, no less.
+- Command *names* and *behavior* for the original non-STB/EPL commands are
+  unchanged — verified against the original command list, no more, no less.
