@@ -795,7 +795,7 @@ _ADB_KEYEVENTS = {
 
 # Default channel number for the full start sequence (".ststart" / the EPL
 # auto-scheduler). Override with STB_DEFAULT_CHANNEL in .env.
-STB_DEFAULT_CHANNEL = os.getenv("STB_DEFAULT_CHANNEL", "48")
+STB_DEFAULT_CHANNEL = os.getenv("STB_DEFAULT_CHANNEL", "36")
 
 
 def connect_adb() -> tuple[bool, str]:
