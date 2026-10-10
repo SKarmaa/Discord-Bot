@@ -79,6 +79,10 @@ async def on_ready():
         bot.loop.create_task(epl_scheduler_loop())
         bot.loop.create_task(epl_live_score_loop())
         print("🏴\U000e0067\U000e0062\U000e0065\U000e006e\U000e0067\U000e007f EPL scheduler + live score tracker armed.")
+        if FEATURES.get("epl_stream_guard", False):
+            from cogs.epl_stream_guard import start_guard_loop
+            start_guard_loop()
+            print("🛡️ EPL stream guard (watchdog + channel vote) armed.")
     else:
         print("🏴 EPL tracker disabled (features.json -> epl_tracker=false).")
 

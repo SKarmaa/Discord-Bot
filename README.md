@@ -39,10 +39,9 @@ ARDUINO_IR_PORT=COM5
 STB_ADB_HOST=192.168.x.x
 STB_ADB_PORT=5555
 
-# Default channel number the .ststart full sequence / EPL auto-scheduler
-# switches to when powering on. Optional — defaults to "48" in code even if
-# left out of .env entirely.
-STB_DEFAULT_CHANNEL=48
+# Fallback default channel for .ststart / the EPL auto-scheduler. Only used
+# if features.json has no "stb_default_channel" (which defaults to "36").
+STB_DEFAULT_CHANNEL=36
 ```
 
 Required: `TOKEN`, `GEMINI_API_KEY`. Everything else is only needed if the
@@ -82,6 +81,7 @@ cogs/
   pc_control.py                     AutoHotkey bridge + NetTV/STB remote control (IR + ADB)
   worldcup.py                        World Cup 2026 auto-stream scheduler + live scores (browser/screen-share setup)
   epl.py                              Premier League auto-stream scheduler + live scores (capture-card/webcam setup)
+  epl_stream_guard.py                 EPL stream watchdog (box/app/channel/VC/camera) + .chvote channel voting
 ```
 
 ## Feature toggles (`features.json`)
@@ -162,7 +162,7 @@ if you hit `'adb' is not recognized`.
 
 | Command | Does |
 |---|---|
-| `.ststart [channel]` | Power on → switch channel (default `STB_DEFAULT_CHANNEL`, `48`) → join VC → camera on |
+| `.ststart [channel]` | Power on (skipped if already on) → switch channel (default `stb_default_channel`, `36`) → join VC → camera on |
 | `.stend` | Sleep the box → disconnect from VC |
 
 Both reply once at the start ("Running full start/end sequence…") and once
@@ -243,6 +243,32 @@ EPL commands: `.eplenable` / `.epldisable` / `.eplstatus` / `.epltest` /
 `.eplreset` / `.eplscores` / `.eplscore [team]` / `.eplgo` (manual start) /
 `.eplend` (manual end, force-clears the active-match tracking too).
 
+### EPL stream guard + channel vote (`cogs/epl_stream_guard.py`, `epl_stream_guard`)
+
+While the EPL stream is live, a watchdog checks every
+`epl_guard_interval_seconds` (45 s) and fixes whatever is missing, in order:
+
+1. **NetTV box awake** (`dumpsys power`) → `KEYCODE_WAKEUP`, then `KEYCODE_POWER` if still asleep
+2. **Live TV in front** (`dumpsys window`) → relaunch `stb_livetv_package` (or `KEYCODE_TV` if unset)
+3. **On the expected channel** — 36 (Kantipur Max HD 1) by default, or 48 (Kantipur Max HD 2) after a vote → re-type the number.
+   The channel is only *verified* if the NetTV app exposes the channel name via Android media sessions; otherwise the bot trusts the last channel it tuned and always re-tunes after fixing 1 or 2.
+4. **Stream account** (`epl_stream_account_id`) **in the stream VC** (`epl_stream_voice_channel_id`) → AHK `disconnect` (if in the wrong VC) + `join`
+5. **Its camera on** (voice state `self_video`) → AHK `streamstart`. The camera hotkey is a toggle, so this is only sent after two reads that say video is off.
+
+Each repair has a 60 s cooldown; after 3 failures in a row it posts one warning and retries every 5 min.
+It waits 240 s after a stream start before acting, so it never fights the start sequence.
+
+**Do once:** put the box on Live TV and run `.stbfocus save`, so the guard knows which app is Live TV.
+
+| Command | Who | Does |
+|---|---|---|
+| `.chvote` / `.chvote 1` / `.chvote 2` | anyone in the stream VC | Vote to switch between Kantipur Max HD 1 (36) and HD 2 (48). Passes when a strict majority of the people in the VC (excluding the stream account and bots; the requester counts as ✅) react ✅. Fails on timeout (`epl_channel_vote_seconds`, 120 s) or when a majority can no longer be reached. |
+| `.chcurrent` | anyone | Which channel the stream is on |
+| `.eplguard [status\|fix\|on\|off]` | admins | Show the live check results / force a repair pass now / pause the watchdog |
+| `.stbfocus [save]` | admins | Show the box's foreground app / save it as the Live TV app |
+
+Every stream start resets the channel to `stb_default_channel` (36). The start sequence is: power on (only if off) → wait `stb_boot_wait_seconds` (15 s) → wait up to `stb_livetv_wait_seconds` (40 s) for Live TV to be in front, opening it if the box is on the home screen → wait `stb_livetv_settle_seconds` (60 s) → type 36 → wait `stb_channel_settle_seconds` (5 s) → join VC → camera on.
+
 ## Feature toggles quick-reference for the STB/EPL stack
 
 To run the full ADB-powered EPL auto-stream setup:
@@ -251,6 +277,7 @@ To run the full ADB-powered EPL auto-stream setup:
 "epl_tracker": true,
 "stb_adb_control": true,
 "epl_control_stb_power": true,
+"epl_stream_guard": true,
 "pc_control": true
 ```
 

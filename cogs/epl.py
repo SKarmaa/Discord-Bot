@@ -44,6 +44,7 @@ from cogs.pc_control import (
     _send_ahk_command, _send_ir_command, _send_adb_keyevent, _pc_admin_check,
     stb_full_start_sequence, stb_full_end_sequence,
 )
+from cogs.epl_stream_guard import on_stream_start as _guard_on_stream_start
 
 FEATURE = "epl_tracker"
 
@@ -256,10 +257,13 @@ async def _epl_run_full_start(label: str, channel: discord.TextChannel):
     """Dispatch the start sequence: the full power+channel+join+camera
     sequence over ADB when available (preferred — real distinct power
     keyevent, and can switch to the right channel), otherwise fall back to
-    the AHK-only join+camera sequence (optionally with Arduino IR power)."""
+    the AHK-only join+camera sequence (optionally with Arduino IR power).
+    Every start resets the channel to the default (36 = Kantipur Max HD 1)
+    and tells the stream guard a start is in progress."""
+    start_channel = _guard_on_stream_start()
     if FEATURES.get("epl_control_stb_power", False) and FEATURES.get("stb_adb_control", False):
         await channel.send(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 **EPL Auto-Scheduler** › {label} — starting sequence…")
-        results = await stb_full_start_sequence(os.getenv("STB_DEFAULT_CHANNEL") or None)
+        results = await stb_full_start_sequence(start_channel)
         failed = [f"`{cmd}`: {msg}" for cmd, ok, msg in results if not ok]
         if failed:
             await channel.send("⚠️ **Sequence finished with issues:**\n" + "\n".join(failed))

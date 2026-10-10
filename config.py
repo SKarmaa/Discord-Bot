@@ -63,6 +63,19 @@ DEFAULT_FEATURES = {
     "stb_ir_control": False,            # Arduino Uno + IR bridge for NetTV box power — OFF by default
     "stb_adb_control": True,           # ADB-over-wifi control for Android-TV STBs (preferred when available) — OFF by default
     "epl_control_stb_power": True,     # if True, EPL auto-sequences also power the STB on/off (ADB preferred over IR if both enabled)
+    "epl_stream_guard": True,          # watchdog that keeps the NetTV/Discord EPL stream alive + .chvote channel voting
+    "epl_stream_voice_channel_id": 1514648474799575162,  # VC the stream account streams into / where voters must be
+    "epl_stream_account_id": 765577654438330429,         # the Discord account that streams the NetTV camera feed
+    "epl_guard_interval_seconds": 45,  # how often the watchdog checks while the stream is live
+    "epl_channel_vote_seconds": 120,    # how long a .chvote stays open
+    "stb_default_channel": "36",       # channel every stream starts on (wins over STB_DEFAULT_CHANNEL in .env)
+    "stb_epl_channels": {"36": "Kantipur Max HD 1", "48": "Kantipur Max HD 2"},
+    "stb_livetv_package": "",          # NetTV Live TV app package — set with `.stbfocus save`
+    "stb_livetv_activity": "",
+    "stb_boot_wait_seconds": 15,       # after powering the box on, wait this long before anything else
+    "stb_livetv_wait_seconds": 40,     # max wait for Live TV to open before typing the channel
+    "stb_livetv_settle_seconds": 60,    # once Live TV is open, let the picture start before typing the channel
+    "stb_channel_settle_seconds": 5,   # after typing the channel, before joining VC / camera on
     "welcome_messages": True,
     "trigger_word_responses": True,
     "random_reactions": True,

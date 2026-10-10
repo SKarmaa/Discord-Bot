@@ -28,6 +28,7 @@ from aiohttp import web as _web
 from discord.ext import commands
 
 from bot_instance import bot
+from config import FEATURES
 from core.features import require_feature
 from core.mention_safety import neutralize_mentions
 from core.permissions import is_admin_user
@@ -794,8 +795,20 @@ _ADB_KEYEVENTS = {
 }
 
 # Default channel number for the full start sequence (".ststart" / the EPL
-# auto-scheduler). Override with STB_DEFAULT_CHANNEL in .env.
+# auto-scheduler). features.json -> "stb_default_channel" wins (default
+# "36" = Kantipur Max HD 1); STB_DEFAULT_CHANNEL in .env is only a fallback
+# for older setups that don't have the features.json key yet.
 STB_DEFAULT_CHANNEL = os.getenv("STB_DEFAULT_CHANNEL", "36")
+
+
+def stb_default_channel() -> str:
+    return str(FEATURES.get("stb_default_channel") or STB_DEFAULT_CHANNEL or "36").strip()
+
+
+# Live state: the channel number the bot last tuned the box to. Read by
+# cogs/epl_stream_guard.py (watchdog + channel vote) as the "expected"
+# channel. None = the bot hasn't tuned anything this session.
+STB_STATE: dict = {"channel": None}
 
 
 def connect_adb() -> tuple[bool, str]:
@@ -826,7 +839,8 @@ def _run_adb_sync(args: list[str]) -> tuple[bool, str]:
         def _once():
             return subprocess.run(
                 ["adb", "-s", ADB_TARGET] + args,
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=15,
+                encoding="utf-8", errors="replace",
             )
         result = _once()
         out = ((result.stdout or "") + (result.stderr or "")).strip()
@@ -857,6 +871,47 @@ async def _send_adb_keyevent(name: str) -> tuple[bool, str]:
     return await asyncio.get_event_loop().run_in_executor(
         None, _run_adb_sync, ["shell", "input", "keyevent", code]
     )
+
+
+async def adb_shell(*args: str) -> tuple[bool, str]:
+    """Run `adb shell <args...>` off the event loop and return (ok, output)."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync, ["shell", *args]
+    )
+
+
+async def stb_power_state() -> bool | None:
+    """True = box awake / screen on, False = asleep/standby, None = couldn't
+    tell (ADB unreachable or unfamiliar dumpsys format)."""
+    import re
+    ok, out = await adb_shell("dumpsys", "power")
+    if not ok or not out:
+        return None
+    m = re.search(r"mWakefulness=(\w+)", out)
+    if m:
+        return m.group(1).lower() == "awake"
+    m = re.search(r"Display Power: state=(\w+)", out)
+    if m:
+        return m.group(1).upper() == "ON"
+    m = re.search(r"mScreenOn=(true|false)", out)
+    if m:
+        return m.group(1) == "true"
+    return None
+
+
+async def stb_tune_channel(number: str) -> tuple[bool, str]:
+    """Type a channel number on the box (one KEYCODE_<digit> per digit, like
+    the remote) and remember it as the current channel on success."""
+    number = str(number).strip()
+    if not number.isdigit():
+        return False, f"Not a channel number: {number!r}"
+    codes = [f"KEYCODE_{d}" for d in number]
+    ok, msg = await asyncio.get_event_loop().run_in_executor(
+        None, _run_adb_sync, ["shell", "input", "keyevent"] + codes
+    )
+    if ok:
+        STB_STATE["channel"] = number
+    return ok, msg
 
 
 async def _send_adb_app(package: str) -> tuple[bool, str]:
@@ -1037,10 +1092,7 @@ async def stb_channel(ctx: commands.Context, *, number: str = ""):
     if not number.isdigit():
         await ctx.reply("❌ Provide a channel number, digits only. Example: `.stbchannel 49`")
         return
-    codes = [f"KEYCODE_{d}" for d in number]
-    ok, msg = await asyncio.get_event_loop().run_in_executor(
-        None, _run_adb_sync, ["shell", "input", "keyevent"] + codes
-    )
+    ok, msg = await stb_tune_channel(number)
     await ctx.reply(f"📺 **Switched to channel {number}!**" if ok else f"❌ {msg}")
 
 
@@ -1056,24 +1108,67 @@ async def stb_channel(ctx: commands.Context, *, number: str = ""):
 #        — by design, per the shutdown sequence requested: sleep + disconnect
 #        only.)
 
+async def stb_wait_for_live_tv() -> tuple[bool, str]:
+    """Wait (up to stb_livetv_wait_seconds, default 40 s) until NetTV's Live
+    TV app is in front. If the box is sitting on the home screen it opens
+    Live TV itself. Then waits stb_livetv_settle_seconds (default 60 s) so the
+    stream starts playing before the channel is typed.
+    Without a saved Live TV app (.stbfocus save) it can only tell "home
+    screen" apart from "some app", so it accepts any non-home-screen app."""
+    from cogs.epl_stream_guard import _launch_live_tv, _on_live_tv, foreground_app
+    timeout = int(FEATURES.get("stb_livetv_wait_seconds", 40) or 40)
+    settle = int(FEATURES.get("stb_livetv_settle_seconds", 60) or 0)
+    deadline = time.monotonic() + timeout
+    launched_at = None
+    while True:
+        live = _on_live_tv(await foreground_app())
+        if live:
+            await asyncio.sleep(settle)
+            return True, "Live TV open"
+        if live is None and not FEATURES.get("stb_livetv_package"):
+            # Not the home screen, but we don't know which app is Live TV.
+            await asyncio.sleep(settle)
+            return True, "assumed open (run .stbfocus save so this can be checked)"
+        if live is False and (launched_at is None or time.monotonic() - launched_at > 15):
+            await _launch_live_tv()          # on the home screen / wrong app — open it
+            launched_at = time.monotonic()
+        if time.monotonic() >= deadline:
+            return False, f"Live TV didn't open within {timeout}s — typing the channel anyway"
+        await asyncio.sleep(3)
+
+
 async def stb_full_start_sequence(channel_number: str | None = None) -> list[tuple[str, bool, str]]:
     """Run the full match-start sequence. Returns a list of
     (step_label, ok, message) tuples in the order each step ran, so callers
     can report every step (not just the first failure)."""
     results: list[tuple[str, bool, str]] = []
 
-    ok, msg = await _send_adb_keyevent("power")
-    results.append(("stbpower", ok, msg))
-    await asyncio.sleep(2)
-
-    ch = (channel_number or STB_DEFAULT_CHANNEL).strip()
-    if ch.isdigit():
-        codes = [f"KEYCODE_{d}" for d in ch]
-        ok, msg = await asyncio.get_event_loop().run_in_executor(
-            None, _run_adb_sync, ["shell", "input", "keyevent"] + codes
-        )
-        results.append((f"stbchannel {ch}", ok, msg))
+    # KEYCODE_POWER is a TOGGLE — pressing it on a box that's already on
+    # turns it OFF. So check the power state first and only press it when
+    # the box is actually asleep (or when we can't tell, the old behaviour).
+    awake = await stb_power_state()
+    if awake:
+        results.append(("stbpower", True, "already on — skipped"))
+    else:
+        ok, msg = await _send_adb_keyevent("power")
+        results.append(("stbpower", ok, msg))
         await asyncio.sleep(2)
+        if awake is False and await stb_power_state() is False:
+            ok, msg = await _send_adb_keyevent("wake")
+            results.append(("stbwake", ok, msg))
+        # Give NetTV time to boot back up before touching anything.
+        await asyncio.sleep(int(FEATURES.get("stb_boot_wait_seconds", 15) or 0))
+
+    # Make sure Live TV is actually open (and playing) before typing the
+    # channel — digits pressed on the home screen or during boot get lost.
+    ok, msg = await stb_wait_for_live_tv()
+    results.append(("live tv", ok, msg))
+
+    ch = (channel_number or stb_default_channel()).strip()
+    if ch.isdigit():
+        ok, msg = await stb_tune_channel(ch)
+        results.append((f"stbchannel {ch}", ok, msg))
+        await asyncio.sleep(int(FEATURES.get("stb_channel_settle_seconds", 5) or 0))
 
     ok, msg = await _send_ahk_command("join", timeout=8.0)
     results.append(("join", ok, msg))
@@ -1103,7 +1198,7 @@ async def stb_full_end_sequence() -> list[tuple[str, bool, str]]:
 @bot.command(name="ststart")
 async def st_start(ctx: commands.Context, *, channel_number: str = ""):
     """Run the full match-start sequence manually: power on -> switch
-    channel (default from STB_DEFAULT_CHANNEL, currently """ + STB_DEFAULT_CHANNEL + """) -> join VC -> camera on. (Admins only)
+    channel (default: features.json -> stb_default_channel, 36) -> join VC -> camera on. (Admins only)
     Example: `.ststart` (uses default channel) or `.ststart 48` (specific channel)."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
