@@ -101,11 +101,22 @@ def _report_channel():
 
 
 def _is_streaming() -> bool:
+    """EPL stream is on according to the scheduler (also restored after a
+    mid-match restart). This is what the watchdog runs on."""
     try:
         import cogs.epl as epl
         return bool(epl._epl_streaming_active)
     except Exception:
         return False
+
+
+def _stream_live() -> bool:
+    """For .chvote: the scheduler says we're streaming, OR the stream account
+    is actually in the stream VC with video on (e.g. started with .ststart)."""
+    if _is_streaming():
+        return True
+    st = discord_state()
+    return bool(st["in_vc"] and st["video"])
 
 
 def _save_feature(key: str, value) -> None:
@@ -641,8 +652,9 @@ async def channel_vote_cmd(ctx: commands.Context, *, target: str = ""):
     if not (ctx.author.voice and ctx.author.voice.channel and ctx.author.voice.channel.id == _vc_id()):
         await ctx.reply(f"❌ You need to be in <#{_vc_id()}> to request a channel switch.")
         return
-    if not _is_streaming():
-        await ctx.reply("❌ The EPL stream isn't running right now.")
+    if not _stream_live():
+        await ctx.reply(f"❌ The stream isn't running right now (<@{_account_id()}> isn't in <#{_vc_id()}> with video on).",
+                        allowed_mentions=discord.AllowedMentions.none())
         return
     if _active_vote is not None and not _active_vote.done:
         await ctx.reply("⏳ There's already a channel vote going — vote on that one.")

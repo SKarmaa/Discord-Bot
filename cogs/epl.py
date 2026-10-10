@@ -311,7 +311,24 @@ async def _epl_scheduler_loop():
                 skipped += 1
             elif m["kickoff"] <= now_utc_boot:
                 _epl_scheduled.setdefault(pre_key, "fired")
+                # Bot (re)started mid-match: pick the live match back up so
+                # the stream counts as running (stream guard + .chvote work,
+                # and the end sequence still fires when it finishes).
+                mins_in = (now_utc_boot - m["kickoff"]).total_seconds() / 60
+                if m["status"] in ("IN_PLAY", "PAUSED") or (
+                        m["status"] in ("TIMED", "SCHEDULED") and mins_in < EPL_FALLBACK_MINUTES):
+                    _epl_active_matches.add(m["id"])
+                    _epl_streaming_active = True
+            elif (m["kickoff"] - now_utc_boot).total_seconds() / 60 < EPL_PRE_WINDOW_LOW:
+                # Inside the last few minutes before kickoff — the pre-window
+                # was missed while the bot was down, so treat it as started.
+                _epl_scheduled.setdefault(pre_key, "fired")
+                _epl_active_matches.add(m["id"])
+                _epl_streaming_active = True
         print(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 Startup: pre-armed {skipped} already-finished matches (won't fire post-match).")
+        if _epl_streaming_active:
+            print(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 Startup: {len(_epl_active_matches)} match(es) live/about to start — "
+                  f"resuming stream state (stream guard will fix anything missing).")
     except Exception as e:
         print(f"🏴󠁧󠁢󠁥󠁮󠁧󠁿 Startup pre-arm error: {e}")
 
