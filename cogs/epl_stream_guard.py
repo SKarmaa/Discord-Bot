@@ -1,6 +1,6 @@
 """
 cogs/epl_stream_guard.py — keeps the NetTV -> Discord EPL stream alive, and
-lets the people watching vote to switch between the two Kantipur Max HD
+lets the people watching vote to switch between the two Star Sports Select HD
 channels.
 
 Gated behind features.json -> "epl_stream_guard" (needs "epl_tracker",
@@ -16,9 +16,9 @@ Gated behind features.json -> "epl_stream_guard" (needs "epl_tracker",
      b. Live TV app in front?       (adb dumpsys window / activity)
           -> relaunch the Live TV app (stb_livetv_package, learned with
              `.stbfocus save`) or KEYCODE_TV if it isn't set
-     c. On the expected channel?    (36 by default, or 48 after a vote)
+     c. On the expected channel?    (504 by default, or 505 after a vote)
           -> re-types the channel number. The channel can only be *verified*
-             if the NetTV app publishes the channel name (Kantipur Max HD 1/2)
+             if the NetTV app publishes the channel name (Star Sports Select HD 1/2)
              via Android's media session; if it doesn't, the bot trusts the
              last channel it tuned and always re-tunes after fixing a/b.
      d. Stream account (epl_stream_account_id) in the stream VC
@@ -31,9 +31,9 @@ Gated behind features.json -> "epl_stream_guard" (needs "epl_tracker",
    Each repair has a cooldown, and after repeated failures it posts one
    warning and backs off instead of spamming the channel.
 
-2) CHANNEL VOTE — `.chvote [1|2|36|48]`
+2) CHANNEL VOTE — `.chvote [1|2|504|505]`
    Anyone in the stream VC can request a switch between
-     36 = Kantipur Max HD 1   and   48 = Kantipur Max HD 2.
+     504 = Star Sports Select HD 1   and   505 = Star Sports Select HD 2.
    Everyone currently in that VC (humans only, not the stream account) can
    react ✅ / ❌. When a strict majority of the people in the VC have ✅'d
    (the requester counts as ✅), the bot switches channel. The vote fails on
@@ -59,7 +59,7 @@ from cogs.pc_control import (
 
 FEATURE = "epl_stream_guard"
 
-DEFAULT_CHANNEL_NAMES = {"36": "Kantipur Max HD 1", "48": "Kantipur Max HD 2"}
+DEFAULT_CHANNEL_NAMES = {"504": "Star Sports Select HD 1", "505": "Star Sports Select HD 2"}
 
 START_GRACE_SECONDS = 240       # don't "repair" while the start sequence (boot + Live TV wait) is still running
 REPAIR_COOLDOWN = 60            # min seconds between two attempts at the same repair
@@ -145,7 +145,7 @@ _alerted: set[str] = set()           # repair names we've already warned about
 
 def on_stream_start() -> str:
     """Called by cogs/epl.py right before every stream start sequence. Resets
-    the channel to the default (36) and gives the start sequence a grace
+    the channel to the default (504) and gives the start sequence a grace
     period before the watchdog starts second-guessing it. Returns the
     channel the start sequence should tune to."""
     global _stream_started_at
@@ -542,14 +542,14 @@ def _eligible_voters(guild: discord.Guild) -> set[int]:
 
 
 def _resolve_target(arg: str, current: str) -> str | None:
-    nums = list(_channel_names().keys())          # ["36", "48"]
+    nums = list(_channel_names().keys())          # ["504", "505"]
     arg = (arg or "").strip().lower()
     if not arg:
         others = [n for n in nums if n != current]
         return others[0] if others else None
     if arg in nums:
         return arg
-    if arg.isdigit() and 1 <= int(arg) <= len(nums):   # "1" -> HD 1 (36), "2" -> HD 2 (48)
+    if arg.isdigit() and 1 <= int(arg) <= len(nums):   # "1" -> HD 1 (504), "2" -> HD 2 (505)
         return nums[int(arg) - 1]
     for num, name in _channel_names().items():
         if arg in name.lower():
@@ -644,8 +644,8 @@ async def _vote_timer(vote: _Vote):
 @bot.command(name="chvote", aliases=["channelvote", "switchchannel", "switchch"])
 async def channel_vote_cmd(ctx: commands.Context, *, target: str = ""):
     """Ask the people in the stream VC to vote on switching the NetTV channel
-    between Kantipur Max HD 1 (36) and Kantipur Max HD 2 (48).
-    `.chvote` switches to the other one; `.chvote 1` / `.chvote 2` / `.chvote 48` pick one."""
+    between Star Sports Select HD 1 (504) and Star Sports Select HD 2 (505).
+    `.chvote` switches to the other one; `.chvote 1` / `.chvote 2` / `.chvote 505` pick one."""
     global _active_vote
     if ctx.guild is None:
         return

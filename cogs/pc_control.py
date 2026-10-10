@@ -796,13 +796,13 @@ _ADB_KEYEVENTS = {
 
 # Default channel number for the full start sequence (".ststart" / the EPL
 # auto-scheduler). features.json -> "stb_default_channel" wins (default
-# "36" = Kantipur Max HD 1); STB_DEFAULT_CHANNEL in .env is only a fallback
+# "504" = Star Sports Select HD 1); STB_DEFAULT_CHANNEL in .env is only a fallback
 # for older setups that don't have the features.json key yet.
-STB_DEFAULT_CHANNEL = os.getenv("STB_DEFAULT_CHANNEL", "36")
+STB_DEFAULT_CHANNEL = os.getenv("STB_DEFAULT_CHANNEL", "504")
 
 
 def stb_default_channel() -> str:
-    return str(FEATURES.get("stb_default_channel") or STB_DEFAULT_CHANNEL or "36").strip()
+    return str(FEATURES.get("stb_default_channel") or STB_DEFAULT_CHANNEL or "504").strip()
 
 
 # Live state: the channel number the bot last tuned the box to. Read by
@@ -900,28 +900,31 @@ async def stb_power_state() -> bool | None:
 
 
 def stb_channels_on_screen(ui_xml: str) -> set[str]:
-    """Which of our stream channels (36/48) the NetTV channel banner shows in
-    a `uiautomator dump`. The banner has the number as its own text node
-    (text="48") and the name ("Kantipur Max 2 HD") — either is enough.
+    """Which of our stream channels (504/505) the NetTV channel banner shows
+    in a `uiautomator dump`. The banner has the number as its own text node
+    (text="505"), or leading the name on the OK overlay ("504  Star Sports
+    Select HD 1"), plus the channel name — any of these is enough.
     Empty set when no banner is visible."""
     import re
     channels = {str(k): str(v) for k, v in
-                (FEATURES.get("stb_epl_channels") or {"36": "Kantipur Max HD 1", "48": "Kantipur Max HD 2"}).items()}
-    order = list(channels)                       # ["36", "48"] -> "Max 1" = 36, "Max 2" = 48
+                (FEATURES.get("stb_epl_channels") or {"504": "Star Sports Select HD 1", "505": "Star Sports Select HD 2"}).items()}
+
+    def norm(x: str) -> str:            # "Star Sports Select 1 HD" == "Star Sports Select HD 1"
+        return re.sub(r"[^a-z0-9]", "", re.sub(r"\bhd\b", "", x.lower()))
+    names = {norm(v): k for k, v in channels.items()}
     texts = re.findall(r'text="([^"]+)"', ui_xml or "")
     found = set()
     for t in texts:
         t = t.strip()
-        # number on its own (banner: text="48") or leading the name
-        # (OK-button overlay: text="36  Kantipur Max HD")
+        # number on its own (banner: text="505") or leading the name
+        # (OK-button overlay: text="504  Star Sports Select HD 1")
         m = re.match(r"(\d+)(?:\s|$)", t)
         if m:
             if m.group(1) in channels:
                 found.add(m.group(1))
             continue                 # a number was shown — trust it over the name
-        m = re.search(r"kantipur\s*max\s*(?:hd\s*)?(\d)", t, re.IGNORECASE)
-        if m and 1 <= int(m.group(1)) <= len(order):
-            found.add(order[int(m.group(1)) - 1])
+        if norm(t) in names:
+            found.add(names[norm(t)])
     return found
 
 
@@ -1264,8 +1267,8 @@ async def stb_full_end_sequence() -> list[tuple[str, bool, str]]:
 async def st_start(ctx: commands.Context, *, channel_number: str = ""):
     """Run the full match-start sequence manually: power on -> join VC ->
     camera on -> wait for Live TV (+60 s) -> switch channel (default:
-    features.json -> stb_default_channel, 36). (Admins only)
-    Example: `.ststart` (uses default channel) or `.ststart 48` (specific channel)."""
+    features.json -> stb_default_channel, 504). (Admins only)
+    Example: `.ststart` (uses default channel) or `.ststart 505` (specific channel)."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return

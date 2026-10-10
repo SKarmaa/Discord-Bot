@@ -23,10 +23,10 @@
   "epl_stream_account_id": 765577654438330429,
   "epl_guard_interval_seconds": 45,
   "epl_channel_vote_seconds": 120,
-  "stb_default_channel": "36",
+  "stb_default_channel": "504",
   "stb_epl_channels": {
-    "36": "Kantipur Max HD 1",
-    "48": "Kantipur Max HD 2"
+    "504": "Star Sports Select HD 1",
+    "505": "Star Sports Select HD 2"
   },
   "stb_livetv_package": "np.com.geniussystems.android.atv.livetv",
   "stb_livetv_activity": "np.com.geniussystems.android.stb.livetv.ui.main.MainActivity",

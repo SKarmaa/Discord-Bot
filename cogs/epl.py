@@ -258,7 +258,7 @@ async def _epl_run_full_start(label: str, channel: discord.TextChannel):
     sequence over ADB when available (preferred — real distinct power
     keyevent, and can switch to the right channel), otherwise fall back to
     the AHK-only join+camera sequence (optionally with Arduino IR power).
-    Every start resets the channel to the default (36 = Kantipur Max HD 1)
+    Every start resets the channel to the default (504 = Star Sports Select HD 1)
     and tells the stream guard a start is in progress."""
     start_channel = _guard_on_stream_start()
     if FEATURES.get("epl_control_stb_power", False) and FEATURES.get("stb_adb_control", False):

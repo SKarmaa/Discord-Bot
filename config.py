@@ -68,8 +68,8 @@ DEFAULT_FEATURES = {
     "epl_stream_account_id": 765577654438330429,         # the Discord account that streams the NetTV camera feed
     "epl_guard_interval_seconds": 45,  # how often the watchdog checks while the stream is live
     "epl_channel_vote_seconds": 120,    # how long a .chvote stays open
-    "stb_default_channel": "36",       # channel every stream starts on (wins over STB_DEFAULT_CHANNEL in .env)
-    "stb_epl_channels": {"36": "Kantipur Max HD 1", "48": "Kantipur Max HD 2"},
+    "stb_default_channel": "504",       # channel every stream starts on (wins over STB_DEFAULT_CHANNEL in .env)
+    "stb_epl_channels": {"504": "Star Sports Select HD 1", "505": "Star Sports Select HD 2"},
     "stb_livetv_package": "",          # NetTV Live TV app package — set with `.stbfocus save`
     "stb_livetv_activity": "",
     "stb_channel_check_key": "",  # "" = off (only check after tuning). "KEYCODE_DPAD_CENTER" = press OK every interval to read the channel overlay
