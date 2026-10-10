@@ -54,7 +54,7 @@ from core.features import require_feature
 from cogs.pc_control import (
     STB_STATE, _pc_admin_check, _send_adb_app, _send_adb_keyevent,
     _send_ahk_command, adb_shell, stb_default_channel, stb_power_state,
-    stb_tune_channel,
+    stb_read_banner, stb_tune_channel,
 )
 
 FEATURE = "epl_stream_guard"
@@ -182,17 +182,35 @@ def _on_live_tv(fg: tuple[str, str] | None) -> bool | None:
     return None            # some other app — can't be sure without stb_livetv_package
 
 
-async def detect_channel() -> str | None:
-    """Best-effort: look for 'Kantipur Max HD 1/2' in the box's media
-    sessions. Returns '36'/'48' if exactly one is found, else None."""
-    ok, out = await adb_shell("dumpsys", "media_session")
-    if not ok or not out:
+_last_channel_check = 0.0
+
+
+async def detect_channel(force: bool = False) -> str | None:
+    """Which channel the box is on, read from NetTV's channel banner.
+    The banner is only on screen briefly, so this presses
+    `stb_channel_check_key` (a key that shows the banner WITHOUT changing
+    channel, e.g. KEYCODE_INFO / KEYCODE_DPAD_CENTER on some boxes) first.
+    If that key isn't configured it returns None (can't check), and the
+    guard trusts the last channel it typed — which is verified on screen
+    every time it tunes."""
+    global _last_channel_check
+    key = (FEATURES.get("stb_channel_check_key") or "").strip()
+    if not key:
         return None
-    found = set()
-    for num, name in _channel_names().items():
-        if re.search(re.escape(name) + r"(?!\d)", out, re.IGNORECASE):
-            found.add(num)
-    return found.pop() if len(found) == 1 else None
+    # The overlay is visible to viewers, so only check every few minutes.
+    every = int(FEATURES.get("stb_channel_check_interval_seconds", 300) or 300)
+    if not force and time.monotonic() - _last_channel_check < every:
+        return None
+    _last_channel_check = time.monotonic()
+    shown = await stb_read_banner(press=key)
+    dismiss = (FEATURES.get("stb_channel_check_dismiss_key") or "").strip()
+    if dismiss:
+        await _send_adb_keyevent_raw(dismiss)
+    return next(iter(shown)) if len(shown) == 1 else None
+
+
+async def _send_adb_keyevent_raw(code: str):
+    await adb_shell("input", "keyevent", code)
 
 
 def discord_state() -> dict:
@@ -222,7 +240,7 @@ async def collect_status() -> dict:
         "awake": awake,
         "foreground": fg,
         "live_tv": _on_live_tv(fg) if awake else False,
-        "channel_detected": await detect_channel() if awake else None,
+        "channel_detected": await detect_channel(force=True) if awake else None,
         "channel_expected": _expected_channel(),
         **discord_state(),
     }
@@ -234,7 +252,8 @@ def _status_lines(st: dict) -> list[str]:
     fg = f"`{st['foreground'][0]}`" if st.get("foreground") else "unknown"
     det = st.get("channel_detected")
     if det is None:
-        ch_line = f"❔ expecting **{_label(st['channel_expected'])}** (can't read the channel from the box — trusting last tune)"
+        ch_line = (f"❔ expecting **{_label(st['channel_expected'])}** (not re-checked — set stb_channel_check_key; "
+                   f"every channel change is checked on screen)")
     else:
         ch_line = (f"{yn(det == st['channel_expected'])} on **{_label(det)}**"
                    f" (expected {_label(st['channel_expected'])})")
@@ -662,7 +681,7 @@ async def channel_vote_cmd(ctx: commands.Context, *, target: str = ""):
 @bot.command(name="chcurrent", aliases=["whichchannel"])
 async def channel_current_cmd(ctx: commands.Context):
     """Show which NetTV channel the stream is on."""
-    detected = await detect_channel()
+    detected = await detect_channel(force=True)
     extra = "" if detected is None else f" (box reports {_label(detected)})"
     await ctx.reply(f"📺 Stream channel: **{_label(_expected_channel())}**{extra}")
 

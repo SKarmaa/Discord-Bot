@@ -899,19 +899,78 @@ async def stb_power_state() -> bool | None:
     return None
 
 
-async def stb_tune_channel(number: str) -> tuple[bool, str]:
+def stb_channels_on_screen(ui_xml: str) -> set[str]:
+    """Which of our stream channels (36/48) the NetTV channel banner shows in
+    a `uiautomator dump`. The banner has the number as its own text node
+    (text="48") and the name ("Kantipur Max 2 HD") — either is enough.
+    Empty set when no banner is visible."""
+    import re
+    channels = {str(k): str(v) for k, v in
+                (FEATURES.get("stb_epl_channels") or {"36": "Kantipur Max HD 1", "48": "Kantipur Max HD 2"}).items()}
+    order = list(channels)                       # ["36", "48"] -> "Max 1" = 36, "Max 2" = 48
+    texts = re.findall(r'text="([^"]+)"', ui_xml or "")
+    found = set()
+    for t in texts:
+        t = t.strip()
+        # number on its own (banner: text="48") or leading the name
+        # (OK-button overlay: text="36  Kantipur Max HD")
+        m = re.match(r"(\d+)(?:\s|$)", t)
+        if m:
+            if m.group(1) in channels:
+                found.add(m.group(1))
+            continue                 # a number was shown — trust it over the name
+        m = re.search(r"kantipur\s*max\s*(?:hd\s*)?(\d)", t, re.IGNORECASE)
+        if m and 1 <= int(m.group(1)) <= len(order):
+            found.add(order[int(m.group(1)) - 1])
+    return found
+
+
+_UI_DUMP = "sleep {wait}; uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; cat /sdcard/ui.xml"
+
+
+async def stb_read_banner(press: str = "", wait: int = 2) -> set[str]:
+    """Optionally press key(s), wait for the channel banner, dump the screen
+    and return the channels it shows (one adb call, so the banner is still
+    up when the dump runs)."""
+    cmd = (f"input keyevent {press}; " if press else "") + _UI_DUMP.format(wait=wait)
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_adb_sync, ["shell", cmd])
+    return stb_channels_on_screen(out) if ok else set()
+
+
+async def stb_tune_channel(number: str, verify: bool = True) -> tuple[bool, str]:
     """Type a channel number on the box (one KEYCODE_<digit> per digit, like
-    the remote) and remember it as the current channel on success."""
+    the remote), then read the channel banner to confirm it landed there —
+    typing it once more if the banner shows a different channel. Remembers
+    the channel as current on success."""
     number = str(number).strip()
     if not number.isdigit():
         return False, f"Not a channel number: {number!r}"
-    codes = [f"KEYCODE_{d}" for d in number]
-    ok, msg = await asyncio.get_event_loop().run_in_executor(
-        None, _run_adb_sync, ["shell", "input", "keyevent"] + codes
-    )
-    if ok:
+    codes = " ".join(f"KEYCODE_{d}" for d in number)
+    note = ""
+    for attempt in range(2):
+        if verify:
+            shown = await stb_read_banner(press=codes)
+            ok = True                                   # keys sent; banner tells us where it landed
+        else:
+            ok, msg = await asyncio.get_event_loop().run_in_executor(
+                None, _run_adb_sync, ["shell", "input", "keyevent"] + codes.split())
+            if not ok:
+                return False, msg
+            shown = set()
+        if not verify or number in shown:
+            note = "verified on screen" if verify else ""
+            break
+        if shown:                                       # banner shows another channel — retry once
+            note = f"banner showed {', '.join(sorted(shown))}"
+            await asyncio.sleep(3)
+            continue
+        note = "sent (banner not readable — unverified)"
+        break
+    else:
         STB_STATE["channel"] = number
-    return ok, msg
+        return False, f"typed {number} twice but the box shows {note.split('showed ')[-1]}"
+    STB_STATE["channel"] = number
+    return True, note
 
 
 async def _send_adb_app(package: str) -> tuple[bool, str]:
@@ -1147,20 +1206,34 @@ async def stb_full_start_sequence(channel_number: str | None = None) -> list[tup
     # turns it OFF. So check the power state first and only press it when
     # the box is actually asleep (or when we can't tell, the old behaviour).
     awake = await stb_power_state()
+    powered_on = False
     if awake:
         results.append(("stbpower", True, "already on — skipped"))
     else:
         ok, msg = await _send_adb_keyevent("power")
         results.append(("stbpower", ok, msg))
+        powered_on = True
         await asyncio.sleep(2)
         if awake is False and await stb_power_state() is False:
             ok, msg = await _send_adb_keyevent("wake")
             results.append(("stbwake", ok, msg))
-        # Give NetTV time to boot back up before touching anything.
+
+    # Go live on Discord straight away — viewers can watch the box boot,
+    # open Live TV and change channel.
+    ok, msg = await _send_ahk_command("join", timeout=8.0)
+    results.append(("join", ok, msg))
+    await asyncio.sleep(3)
+
+    ok, msg = await _send_ahk_command("streamstart", timeout=8.0)
+    results.append(("streamstart", ok, msg))
+
+    # Then let NetTV finish booting before touching it.
+    if powered_on:
         await asyncio.sleep(int(FEATURES.get("stb_boot_wait_seconds", 15) or 0))
 
-    # Make sure Live TV is actually open (and playing) before typing the
-    # channel — digits pressed on the home screen or during boot get lost.
+    # Make sure Live TV is open (and has had stb_livetv_settle_seconds to
+    # start playing) before typing the channel — digits pressed on the home
+    # screen or during boot get lost.
     ok, msg = await stb_wait_for_live_tv()
     results.append(("live tv", ok, msg))
 
@@ -1168,14 +1241,6 @@ async def stb_full_start_sequence(channel_number: str | None = None) -> list[tup
     if ch.isdigit():
         ok, msg = await stb_tune_channel(ch)
         results.append((f"stbchannel {ch}", ok, msg))
-        await asyncio.sleep(int(FEATURES.get("stb_channel_settle_seconds", 5) or 0))
-
-    ok, msg = await _send_ahk_command("join", timeout=8.0)
-    results.append(("join", ok, msg))
-    await asyncio.sleep(3)
-
-    ok, msg = await _send_ahk_command("streamstart", timeout=8.0)
-    results.append(("streamstart", ok, msg))
 
     return results
 
@@ -1197,8 +1262,9 @@ async def stb_full_end_sequence() -> list[tuple[str, bool, str]]:
 @require_feature(FEATURE_ADB)
 @bot.command(name="ststart")
 async def st_start(ctx: commands.Context, *, channel_number: str = ""):
-    """Run the full match-start sequence manually: power on -> switch
-    channel (default: features.json -> stb_default_channel, 36) -> join VC -> camera on. (Admins only)
+    """Run the full match-start sequence manually: power on -> join VC ->
+    camera on -> wait for Live TV (+60 s) -> switch channel (default:
+    features.json -> stb_default_channel, 36). (Admins only)
     Example: `.ststart` (uses default channel) or `.ststart 48` (specific channel)."""
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")

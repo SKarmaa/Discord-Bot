@@ -72,10 +72,12 @@ DEFAULT_FEATURES = {
     "stb_epl_channels": {"36": "Kantipur Max HD 1", "48": "Kantipur Max HD 2"},
     "stb_livetv_package": "",          # NetTV Live TV app package — set with `.stbfocus save`
     "stb_livetv_activity": "",
+    "stb_channel_check_key": "",  # "" = off (only check after tuning). "KEYCODE_DPAD_CENTER" = press OK every interval to read the channel overlay
+    "stb_channel_check_dismiss_key": "KEYCODE_BACK",  # closes that overlay again
+    "stb_channel_check_interval_seconds": 300,        # overlay is visible to viewers, so only re-check every 5 min
     "stb_boot_wait_seconds": 15,       # after powering the box on, wait this long before anything else
     "stb_livetv_wait_seconds": 40,     # max wait for Live TV to open before typing the channel
     "stb_livetv_settle_seconds": 60,    # once Live TV is open, let the picture start before typing the channel
-    "stb_channel_settle_seconds": 5,   # after typing the channel, before joining VC / camera on
     "welcome_messages": True,
     "trigger_word_responses": True,
     "random_reactions": True,

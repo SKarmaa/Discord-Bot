@@ -162,7 +162,7 @@ if you hit `'adb' is not recognized`.
 
 | Command | Does |
 |---|---|
-| `.ststart [channel]` | Power on (skipped if already on) → switch channel (default `stb_default_channel`, `36`) → join VC → camera on |
+| `.ststart [channel]` | Power on (skipped if already on) → join VC → camera on → wait for Live TV + 60 s → switch channel (default `stb_default_channel`, `36`) |
 | `.stend` | Sleep the box → disconnect from VC |
 
 Both reply once at the start ("Running full start/end sequence…") and once
@@ -251,7 +251,7 @@ While the EPL stream is live, a watchdog checks every
 1. **NetTV box awake** (`dumpsys power`) → `KEYCODE_WAKEUP`, then `KEYCODE_POWER` if still asleep
 2. **Live TV in front** (`dumpsys window`) → relaunch `stb_livetv_package` (or `KEYCODE_TV` if unset)
 3. **On the expected channel** — 36 (Kantipur Max HD 1) by default, or 48 (Kantipur Max HD 2) after a vote → re-type the number.
-   The channel is only *verified* if the NetTV app exposes the channel name via Android media sessions; otherwise the bot trusts the last channel it tuned and always re-tunes after fixing 1 or 2.
+   The channel is read from NetTV's channel banner (`uiautomator dump` → `text="48"` / `"Kantipur Max 2 HD"`). Every channel change is checked on screen and retyped once if it landed wrong. Between changes the channel isn't re-checked (`stb_channel_check_key` is `""`); the bot trusts its last verified tune. To turn periodic checks on, set it to `"KEYCODE_DPAD_CENTER"` — every `stb_channel_check_interval_seconds` (5 min) the bot presses OK, reads the overlay (`36  Kantipur Max HD`) and presses Back; viewers briefly see the overlay.
 4. **Stream account** (`epl_stream_account_id`) **in the stream VC** (`epl_stream_voice_channel_id`) → AHK `disconnect` (if in the wrong VC) + `join`
 5. **Its camera on** (voice state `self_video`) → AHK `streamstart`. The camera hotkey is a toggle, so this is only sent after two reads that say video is off.
 
@@ -267,7 +267,7 @@ It waits 240 s after a stream start before acting, so it never fights the start 
 | `.eplguard [status\|fix\|on\|off]` | admins | Show the live check results / force a repair pass now / pause the watchdog |
 | `.stbfocus [save]` | admins | Show the box's foreground app / save it as the Live TV app |
 
-Every stream start resets the channel to `stb_default_channel` (36). The start sequence is: power on (only if off) → wait `stb_boot_wait_seconds` (15 s) → wait up to `stb_livetv_wait_seconds` (40 s) for Live TV to be in front, opening it if the box is on the home screen → wait `stb_livetv_settle_seconds` (60 s) → type 36 → wait `stb_channel_settle_seconds` (5 s) → join VC → camera on.
+Every stream start resets the channel to `stb_default_channel` (36). The start sequence is: power on (only if off) → join VC → camera on (viewers see the box boot) → wait `stb_boot_wait_seconds` (15 s, only if it was just powered on) → wait up to `stb_livetv_wait_seconds` (40 s) for Live TV to be in front, opening it if the box is on the home screen → wait `stb_livetv_settle_seconds` (60 s) → type 36.
 
 ## Feature toggles quick-reference for the STB/EPL stack
 
