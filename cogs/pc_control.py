@@ -636,13 +636,61 @@ def _ps_quote(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def _capture_restart_sync() -> tuple[bool, str]:
-    name = (FEATURES.get("capture_device_name") or "").strip()
-    iid = (FEATURES.get("capture_device_instance_id") or "").strip()
+_PS_RESTART_FN = r"""
+function Restart-Target($t) {
+    $fn = (Get-PnpDevice -InstanceId $t -ErrorAction SilentlyContinue).FriendlyName
+    Write-Output "Restarting: $fn [$t]"
+    $out = (& pnputil /restart-device "$t" 2>&1) -join ' '
+    # pnputil exits 0 but only *schedules* it when the device is busy
+    if ($LASTEXITCODE -eq 0 -and $out -notmatch 'reboot') { Write-Output "  restarted"; return $true }
+    Write-Output "  pnputil couldn't restart it live — trying disable/enable"
+    try {
+        Disable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        Enable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction Stop
+        Write-Output "  disabled + re-enabled"
+        return $true
+    } catch {
+        Write-Output "  FAILED: $($_.Exception.Message)"
+        try { Enable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction SilentlyContinue } catch {}
+        return $false
+    }
+}
+"""
+
+
+def _capture_restart_sync(full: bool = False) -> tuple[bool, str]:
+    """full=False: restart only the capture card's AUDIO part (the USB audio
+    interface, e.g. "USB3 Digital Audio") — enough for audio dropouts and
+    allowed while Discord is using the card.
+    full=True: restart the whole USB device (= physical replug). Windows may
+    refuse this while the camera is in use ("reboot needed")."""
+    if full:
+        name = (FEATURES.get("capture_device_name") or "").strip()
+        iid = (FEATURES.get("capture_device_instance_id") or "").strip()
+        setting = "capture_device_name"
+    else:
+        name = (FEATURES.get("capture_audio_device_name") or "").strip()
+        iid = ""
+        setting = "capture_audio_device_name"
     if not name and not iid:
-        return False, ("Capture device not configured — run `.capdevices`, then set "
-                       "`capture_device_name` in features.json.")
-    script = f"""
+        return False, (f"Capture device not configured — run `.capdevices`, then set "
+                       f"`{setting}` in features.json.")
+    if full:
+        pick = r"""
+    foreach ($d in $devs) {
+        # The physical USB device (parent) — but NEVER a hub / root hub.
+        $p = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data
+        $pd = if ($p) { Get-PnpDevice -InstanceId $p -ErrorAction SilentlyContinue } else { $null }
+        if ($p -and $p -like 'USB\VID_*' -and $pd -and $pd.FriendlyName -notlike '*hub*') { $targets += $p }
+        elseif ($d.InstanceId -like 'USB\VID_*') { $targets += $d.InstanceId }
+    }"""
+    else:
+        pick = r"""
+    # Only the USB audio interface itself (USB\VID_...&MI_xx), not the
+    # composite parent and not the Windows audio endpoint.
+    foreach ($d in $devs) { if ($d.InstanceId -like 'USB\VID_*') { $targets += $d.InstanceId } }"""
+    script = _PS_RESTART_FN + f"""
 $ErrorActionPreference = 'Continue'
 $name = {_ps_quote(name)}
 $iid  = {_ps_quote(iid)}
@@ -652,34 +700,12 @@ if ($iid) {{
 }} else {{
     $devs = Get-PnpDevice -PresentOnly | Where-Object {{ $_.FriendlyName -like "*$name*" }}
     if (-not $devs) {{ Write-Output "NOTFOUND: no device matching '$name'"; exit 2 }}
-    foreach ($d in $devs) {{
-        # Restart the physical USB device (parent), not just one interface —
-        # but NEVER a hub / root hub (that would drop every USB device).
-        $p = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data
-        $pd = if ($p) {{ Get-PnpDevice -InstanceId $p -ErrorAction SilentlyContinue }} else {{ $null }}
-        if ($p -and $p -like 'USB\VID_*' -and $pd -and $pd.FriendlyName -notlike '*hub*') {{
-            $targets += $p
-        }} elseif ($d.InstanceId -like 'USB\VID_*') {{
-            $targets += $d.InstanceId
-        }}
-    }}
+{pick}
     $targets = @($targets | Select-Object -Unique)
-    if (-not $targets) {{ Write-Output "NOTFOUND: matched devices but none is a USB device"; exit 2 }}
+    if (-not $targets) {{ Write-Output "NOTFOUND: matched '$name' but none is a USB device"; exit 2 }}
 }}
 $failed = $false
-foreach ($t in $targets) {{
-    $fn = (Get-PnpDevice -InstanceId $t -ErrorAction SilentlyContinue).FriendlyName
-    Write-Output "Restarting: $fn [$t]"
-    $out = & pnputil /restart-device "$t" 2>&1
-    if ($LASTEXITCODE -ne 0) {{
-        Write-Output "pnputil: $out — trying disable/enable"
-        try {{
-            Disable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction Stop
-            Start-Sleep -Seconds 3
-            Enable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction Stop
-        }} catch {{ Write-Output "FAILED: $($_.Exception.Message)"; $failed = $true }}
-    }}
-}}
+foreach ($t in $targets) {{ if (-not (Restart-Target $t)) {{ $failed = $true }} }}
 Start-Sleep -Seconds 4
 foreach ($t in $targets) {{
     $st = (Get-PnpDevice -InstanceId $t -ErrorAction SilentlyContinue).Status
@@ -690,30 +716,37 @@ if ($failed) {{ exit 1 }}
 """
     ok, out = _run_ps(script)
     low = out.lower()
-    if "access is denied" in low or "access denied" in low or "requires elevation" in low or "administrator" in low:
+    if "access is denied" in low or "access denied" in low or "requires elevation" in low:
         out += "\n→ The bot needs to run as Administrator to restart devices."
     return ok, out
 
 
-async def capture_restart() -> tuple[bool, str]:
-    return await asyncio.get_event_loop().run_in_executor(None, _capture_restart_sync)
+async def capture_restart(full: bool = False) -> tuple[bool, str]:
+    return await asyncio.get_event_loop().run_in_executor(None, _capture_restart_sync, full)
 
 
 @require_feature(FEATURE)
 @bot.command(name="capreset", aliases=["replug", "fixaudio"])
-async def capture_reset_cmd(ctx: commands.Context):
-    """Software unplug/replug of the USB capture card (fixes the stream's
-    audio dropping out). (Admins only)"""
+async def capture_reset_cmd(ctx: commands.Context, mode: str = ""):
+    """Fix the stream's audio dropping out by restarting the USB capture
+    card's audio part (like replugging it, audio only). (Admins only)
+    `.capreset full` restarts the whole card instead (video too) — Windows
+    may refuse that while the camera is in use."""
     global _capture_reset_last
     if not _pc_admin_check(ctx):
         await ctx.reply("❌ You need Administrator permission to use this command.")
         return
     _capture_reset_last = time.monotonic()
-    await ctx.reply("🔌 Restarting the capture card (unplug/replug)… the stream will freeze for a few seconds.")
-    ok, out = await capture_restart()
+    full = mode.lower() in ("full", "all", "video")
+    if full:
+        await ctx.reply("🔌 Restarting the whole capture card (video + audio)… the stream will freeze for a few seconds.")
+    else:
+        await ctx.reply("🔌 Restarting the capture card's audio… sound will cut out for a few seconds.")
+    ok, out = await capture_restart(full)
     detail = neutralize_mentions(out.strip()[-900:]) or "(no output)"
     if not ok:
-        await ctx.reply(f"❌ Capture card restart failed:\n```\n{detail}\n```")
+        hint = ("" if full else "\nIf the audio is still broken, try `.capreset full` (or unplug it by hand).")
+        await ctx.reply(f"❌ Capture card restart failed:\n```\n{detail}\n```{hint}")
         return
     await ctx.reply(f"✅ Capture card restarted.\n```\n{detail}\n```")
     # Discord can drop the camera when the device disappears — let the
