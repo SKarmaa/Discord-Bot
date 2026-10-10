@@ -269,6 +269,12 @@ It waits 240 s after a stream start before acting, so it never fights the start 
 
 Every stream start resets the channel to `stb_default_channel` (504). The start sequence is: power on (only if off) → join VC → camera on (viewers see the box boot) → wait `stb_boot_wait_seconds` (15 s, only if it was just powered on) → wait up to `stb_livetv_wait_seconds` (40 s) for Live TV to be in front, opening it if the box is on the home screen → wait `stb_livetv_settle_seconds` (60 s) → type 504.
 
+### Capture card replug (`.capreset`, part of `pc_control`)
+
+When the stream's audio drops out, `.capreset` (aliases `.replug`, `.fixaudio`) does a software unplug/replug of the USB capture card: it restarts the whole USB device with `pnputil /restart-device` (falling back to Disable/Enable-PnpDevice), never a USB hub. The stream freezes for a few seconds; afterwards, if an EPL stream is live, the stream guard turns the camera back on if Discord dropped it. Admins only.
+
+Setup: `.capdevices` lists camera/audio devices → set `capture_device_name` in `features.json` to part of the capture card's name (or `capture_device_instance_id` to its exact InstanceId). **The bot must run as Administrator** for Windows to allow restarting a device.
+
 ## Feature toggles quick-reference for the STB/EPL stack
 
 To run the full ADB-powered EPL auto-stream setup:

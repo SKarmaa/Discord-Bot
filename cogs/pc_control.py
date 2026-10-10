@@ -611,6 +611,142 @@ async def debug_edge(ctx: commands.Context):
 start_ahk_server = _start_ahk_server
 
 
+# ── USB capture card "replug" (software unplug/replug) ──────────────────────
+# The capture card's audio sometimes stops until the card is physically
+# unplugged and plugged back in. Windows can do the same thing in software
+# by restarting the device: `pnputil /restart-device` (Windows 10 2004+ /
+# 11), falling back to Disable-PnpDevice + Enable-PnpDevice.
+#
+# The whole USB device is restarted (its video AND audio parts), not just
+# the audio endpoint — that's what a physical replug does. The stream
+# freezes for a few seconds while it comes back.
+#
+# Setup: run `.capdevices` to see the device names, then set
+# features.json -> "capture_device_name" to part of the capture card's name
+# (e.g. "USB Video" / "MS2109" / "Cam Link"). Or set
+# "capture_device_instance_id" to an exact InstanceId to skip name matching.
+#
+# NEEDS ADMIN: the bot process must run as Administrator (or as a service
+# account like LocalSystem) — restarting devices is refused otherwise.
+
+_capture_reset_last = 0.0
+
+
+def _ps_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _capture_restart_sync() -> tuple[bool, str]:
+    name = (FEATURES.get("capture_device_name") or "").strip()
+    iid = (FEATURES.get("capture_device_instance_id") or "").strip()
+    if not name and not iid:
+        return False, ("Capture device not configured — run `.capdevices`, then set "
+                       "`capture_device_name` in features.json.")
+    script = f"""
+$ErrorActionPreference = 'Continue'
+$name = {_ps_quote(name)}
+$iid  = {_ps_quote(iid)}
+$targets = @()
+if ($iid) {{
+    $targets = @($iid)
+}} else {{
+    $devs = Get-PnpDevice -PresentOnly | Where-Object {{ $_.FriendlyName -like "*$name*" }}
+    if (-not $devs) {{ Write-Output "NOTFOUND: no device matching '$name'"; exit 2 }}
+    foreach ($d in $devs) {{
+        # Restart the physical USB device (parent), not just one interface —
+        # but NEVER a hub / root hub (that would drop every USB device).
+        $p = (Get-PnpDeviceProperty -InstanceId $d.InstanceId -KeyName 'DEVPKEY_Device_Parent' -ErrorAction SilentlyContinue).Data
+        $pd = if ($p) {{ Get-PnpDevice -InstanceId $p -ErrorAction SilentlyContinue }} else {{ $null }}
+        if ($p -and $p -like 'USB\VID_*' -and $pd -and $pd.FriendlyName -notlike '*hub*') {{
+            $targets += $p
+        }} elseif ($d.InstanceId -like 'USB\VID_*') {{
+            $targets += $d.InstanceId
+        }}
+    }}
+    $targets = @($targets | Select-Object -Unique)
+    if (-not $targets) {{ Write-Output "NOTFOUND: matched devices but none is a USB device"; exit 2 }}
+}}
+$failed = $false
+foreach ($t in $targets) {{
+    $fn = (Get-PnpDevice -InstanceId $t -ErrorAction SilentlyContinue).FriendlyName
+    Write-Output "Restarting: $fn [$t]"
+    $out = & pnputil /restart-device "$t" 2>&1
+    if ($LASTEXITCODE -ne 0) {{
+        Write-Output "pnputil: $out — trying disable/enable"
+        try {{
+            Disable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction Stop
+            Start-Sleep -Seconds 3
+            Enable-PnpDevice -InstanceId $t -Confirm:$false -ErrorAction Stop
+        }} catch {{ Write-Output "FAILED: $($_.Exception.Message)"; $failed = $true }}
+    }}
+}}
+Start-Sleep -Seconds 4
+foreach ($t in $targets) {{
+    $st = (Get-PnpDevice -InstanceId $t -ErrorAction SilentlyContinue).Status
+    Write-Output "Status now: $st"
+    if ($st -ne 'OK') {{ $failed = $true }}
+}}
+if ($failed) {{ exit 1 }}
+"""
+    ok, out = _run_ps(script)
+    low = out.lower()
+    if "access is denied" in low or "access denied" in low or "requires elevation" in low or "administrator" in low:
+        out += "\n→ The bot needs to run as Administrator to restart devices."
+    return ok, out
+
+
+async def capture_restart() -> tuple[bool, str]:
+    return await asyncio.get_event_loop().run_in_executor(None, _capture_restart_sync)
+
+
+@require_feature(FEATURE)
+@bot.command(name="capreset", aliases=["replug", "fixaudio"])
+async def capture_reset_cmd(ctx: commands.Context):
+    """Software unplug/replug of the USB capture card (fixes the stream's
+    audio dropping out). (Admins only)"""
+    global _capture_reset_last
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    _capture_reset_last = time.monotonic()
+    await ctx.reply("🔌 Restarting the capture card (unplug/replug)… the stream will freeze for a few seconds.")
+    ok, out = await capture_restart()
+    detail = neutralize_mentions(out.strip()[-900:]) or "(no output)"
+    if not ok:
+        await ctx.reply(f"❌ Capture card restart failed:\n```\n{detail}\n```")
+        return
+    await ctx.reply(f"✅ Capture card restarted.\n```\n{detail}\n```")
+    # Discord can drop the camera when the device disappears — let the
+    # stream guard put it back (rejoin / camera on) if a stream is live.
+    try:
+        from cogs.epl_stream_guard import run_guard_pass, _stream_live
+        if _stream_live() or FEATURES.get("epl_stream_guard"):
+            await asyncio.sleep(8)
+            import cogs.epl as _epl
+            if _epl._epl_streaming_active:
+                actions = await run_guard_pass(ctx.channel)
+                if actions:
+                    await ctx.reply("🛠️ Stream guard also did: " + ", ".join(actions))
+    except Exception as e:
+        print(f"[capreset] guard follow-up failed: {e}")
+
+
+@require_feature(FEATURE)
+@bot.command(name="capdevices")
+async def capture_devices_cmd(ctx: commands.Context):
+    """List camera/audio devices so you can find the capture card's name for
+    features.json -> capture_device_name. (Admins only)"""
+    if not _pc_admin_check(ctx):
+        await ctx.reply("❌ You need Administrator permission to use this command.")
+        return
+    script = ("Get-PnpDevice -PresentOnly -Class Camera,Image,MEDIA,AudioEndpoint -ErrorAction SilentlyContinue | "
+              "Sort-Object Class,FriendlyName | ForEach-Object { \"[$($_.Class)] $($_.FriendlyName)  ($($_.Status))\" }")
+    ok, out = await asyncio.get_event_loop().run_in_executor(None, _run_ps, script)
+    out = neutralize_mentions(out.strip())[:1800] or "(nothing found)"
+    cur = FEATURES.get("capture_device_name") or "(not set)"
+    await ctx.reply(f"🎛️ **Camera / audio devices:**\n```\n{out}\n```\nCurrent `capture_device_name`: `{cur}`")
+
+
 # ── NetTV set-top box power control via Arduino Uno + IR ────────────────────
 # The Arduino runs ir_bridge.ino, listens on Serial for text commands, and
 # fires the matching learned IR code at the box. This is a direct serial

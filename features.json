@@ -12,6 +12,8 @@
   "giveaways": true,
   "admin_broadcast": true,
   "pc_control": true,
+  "capture_device_name": "",
+  "capture_device_instance_id": "",
   "worldcup_tracker": false,
   "epl_tracker": true,
   "epl_target_channel_id": 0,

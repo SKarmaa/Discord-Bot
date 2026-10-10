@@ -57,6 +57,8 @@ DEFAULT_FEATURES = {
     "giveaways": True,
     "admin_broadcast": True,            # kpwrite/kpannounce/reload/words
     "pc_control": True,                # AutoHotkey/PC remote-control commands — OFF by default
+    "capture_device_name": "",         # part of the USB capture card's Windows device name, for .capreset (see .capdevices)
+    "capture_device_instance_id": "",  # or its exact PnP InstanceId (overrides the name)
     "worldcup_tracker": False,          # World Cup auto-stream scheduler + live scores — OFF by default
     "epl_tracker": True,               # EPL auto-stream scheduler + live scores — OFF by default
     "epl_target_channel_id": 0,         # 0/unset = falls back to target_channel_id
