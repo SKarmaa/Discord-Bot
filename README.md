@@ -1,4 +1,4 @@
-# KP Oli Bot — modular structure
+# Discord Bot — modular structure
 
 This is your original single-file `main.py` split into modules by task, plus
 a `features.json` toggle system and a hardened @everyone/@here safety net.
