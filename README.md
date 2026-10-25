@@ -1,11 +1,5 @@
 # Discord Bot — modular structure
 
-This is your original single-file `main.py` split into modules by task, plus
-a `features.json` toggle system and a hardened @everyone/@here safety net.
-No functionality was removed — every slash command and prefix command from
-the original file is still here (verified 1:1 against the original command
-list).
-
 ## Setup
 
 ```bash
